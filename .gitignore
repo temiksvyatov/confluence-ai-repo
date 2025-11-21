@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.env
+.env.local
+.venv/
+venv/
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Meilisearch
+meili_data/
+whoosh_index/
+
+# NLTK
+/usr/share/nltk_data/

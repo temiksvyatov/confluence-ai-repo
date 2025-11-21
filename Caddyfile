@@ -1,0 +1,4 @@
+{$DOMAIN} {
+    reverse_proxy frontend:8501
+    tls /certs/fullchain.crt /certs/privkey.key
+}

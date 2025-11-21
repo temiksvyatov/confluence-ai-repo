@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+COPY backend/app ./app
+COPY backend/start.sh .
+
+RUN chmod +x start.sh
+
+EXPOSE 8000
+CMD ["./start.sh"]
