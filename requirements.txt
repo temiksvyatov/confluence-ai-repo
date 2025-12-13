@@ -1,0 +1,23 @@
+fastapi
+uvicorn[standard]
+nicegui
+pydantic
+pydantic-settings
+python-dotenv
+
+# Confluence
+atlassian-python-api
+
+# Text processing
+beautifulsoup4
+html2text
+
+# Embeddings
+sentence-transformers
+torch
+
+# Vector DB
+qdrant-client
+
+# LLM
+openai
