@@ -1,37 +1,32 @@
 import asyncio
 import logging
+
 from fastapi import FastAPI
 from nicegui import ui
+
 from config import get_settings
 from services.confluence_service import ConfluenceService
 from services.embedding_service import EmbeddingService
+from services.indexing_service import IndexingService
 from services.qdrant_service import QdrantService
 from services.rag_service import RAGService
 
-# --- Logging Configuration ---
-# Set up a logger for the application
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.StreamHandler(),  # Log to console
-        # Optionally, you can add a FileHandler to log to a file
-        # logging.FileHandler("app.log"),
+        logging.StreamHandler(),
     ],
 )
 logger = logging.getLogger(__name__)
 
-# Глобальная переменная для хранения истории сообщений
 chat_history = []
 
-# Инициализация FastAPI
 app = FastAPI(title="Confluence RAG Chat")
 
-# Настройки
 settings = get_settings()
 logger.info("Application settings loaded.")
 
-# Инициализация сервисов
 logger.info("Initializing services...")
 
 confluence_service = ConfluenceService(
@@ -41,9 +36,7 @@ confluence_service = ConfluenceService(
 )
 
 try:
-    test_page = confluence_service.fetch_page(
-        "836111732"
-    )  # Используйте реальный ID тестовой страницы
+    test_page = confluence_service.fetch_page("836111732")
     if test_page:
         logger.info("✅ Confluence connection successful. Test page found.")
     else:
@@ -52,7 +45,7 @@ try:
         )
 except Exception as e:
     logger.error(f"❌ Error connecting to Confluence: {e}")
-    raise  # Прерываем работу, если Confluence недоступен
+    raise
 
 embedding_service = EmbeddingService(model_name=settings.embedding_model)
 logger.info(f"Embedding service initialized with model: {settings.embedding_model}")
@@ -75,7 +68,15 @@ rag_service = RAGService(
 )
 logger.info(f"RAG service initialized with LLM model: {settings.llm_model}")
 
-# Инициализация Qdrant коллекции
+indexing_service = IndexingService(
+    confluence_service=confluence_service,
+    embedding_service=embedding_service,
+    qdrant_service=qdrant_service,
+    chunk_size=settings.chunk_size,
+    chunk_overlap=settings.chunk_overlap,
+)
+logger.info("Indexing service initialized")
+
 try:
     qdrant_service.init_collection()
     logger.info("Qdrant collection initialized successfully.")
@@ -86,144 +87,7 @@ except Exception as e:
 logger.info("All services have been successfully initialized.")
 
 
-@ui.page("/")
-def chat_page():
-    """Страница чата."""
-
-    # Функция для обновления истории сообщений
-    def update_chat_history():
-        """Обновить историю сообщений из глобальной переменной."""
-        nonlocal messages
-        messages = chat_history.copy()
-        update_chat()
-
-    # Функция для добавления сообщения в историю
-    def add_message(role: str, content: str):
-        """Добавить сообщение в историю."""
-        chat_history.append({"role": role, "content": content})
-        update_chat_history()
-
-    def update_chat():
-        """Обновить отображение чата."""
-        chat_container.clear()
-        with chat_container:
-            for msg in messages:
-                with ui.card().classes("w-full max-w-3xl mx-auto my-2"):
-                    with ui.row().classes("w-full items-start gap-3 p-3"):
-                        # Аватар пользователя или ассистента
-                        with ui.avatar(
-                            color="primary" if msg["role"] == "user" else "secondary"
-                        ).classes("shrink"):
-                            ui.icon("person" if msg["role"] == "user" else "smart_toy")
-
-                        # Контент сообщения
-                        with ui.column().classes("grow"):
-                            # Имя отправителя и время
-                            with ui.row().classes(
-                                "w-full justify-between items-center"
-                            ):
-                                ui.label(
-                                    "Вы" if msg["role"] == "user" else "Ассистент"
-                                ).classes("font-bold text-sm")
-                                ui.label("только что").classes("text-xs text-gray-500")
-
-                            # Текст сообщения
-                            ui.markdown(msg["content"]).classes("text-sm")
-
-    async def send_message():
-        """Обработать отправку сообщения."""
-        question = question_input.value.strip()
-
-        if not question:
-            ui.notify("Введите вопрос", type="warning")
-            return
-
-        logger.info(f"Received new question: '{question}'")
-
-        # Очищаем поле ввода
-        question_input.value = ""
-
-        # Добавляем вопрос пользователя
-        add_message("user", question)
-
-        # Создаем контейнер для спиннера
-        spinner_container = None
-
-        try:
-            # Показываем спиннер
-            with chat_container:
-                spinner_container = ui.card().classes("w-full max-w-3xl mx-auto my-2")
-                with spinner_container:
-                    with ui.row().classes("w-full items-start gap-3 p-3"):
-                        with ui.avatar(color="secondary").classes("shrink"):
-                            ui.icon("smart_toy")
-                        with ui.column().classes("grow"):
-                            ui.label("Ассистент").classes("font-bold text-sm")
-
-            # Получаем эмбеддинг вопроса
-            logger.info("Generating embedding for the question...")
-            question_embedding = await asyncio.to_thread(
-                embedding_service.embed, question
-            )
-
-            # Ищем в Qdrant
-            logger.info(
-                f"Searching in Qdrant for top_k={settings.top_k_results} results..."
-            )
-            search_results = await asyncio.to_thread(
-                qdrant_service.search,
-                query_embedding=question_embedding,
-                top_k=settings.top_k_results,
-            )
-
-            if not search_results:
-                logger.warning("No relevant information found in the knowledge base.")
-                answer = "Извините, я не нашел релевантной информации в базе знаний."
-            else:
-                logger.info(
-                    f"Found {len(search_results)} relevant chunks. Generating answer..."
-                )
-
-                # Формируем контекст из истории переписки
-                conversation_history = "\n".join(
-                    [f"{msg['role']}: {msg['content']}" for msg in chat_history]
-                )
-
-                # Генерируем ответ с учетом истории переписки
-                answer = await asyncio.to_thread(
-                    rag_service.generate_answer_with_history,
-                    question,
-                    search_results,
-                    conversation_history,
-                )
-
-                # Добавляем источники
-                sources = rag_service.generate_sources_text(search_results)
-                if sources:
-                    answer += "\n\n" + sources
-
-            # Удаляем спиннер и добавляем ответ
-            if spinner_container:
-                spinner_container.delete()
-            add_message("assistant", answer)
-
-        except Exception as e:
-            error_msg = f"An error occurred while processing your request: {str(e)}"
-            logger.error(
-                error_msg, exc_info=True
-            )  # exc_info=True will log the full traceback
-            if spinner_container:
-                spinner_container.delete()
-            add_message("assistant", error_msg)
-            ui.notify(error_msg, type="negative")
-
-    # UI
-    ui.page_title("Confluence RAG Chat")
-
-    # Добавляем стили для всей страницы
-    ui.query("body").style("background-color: #f5f7fa;")
-
-    # Создаем боковую панель навигации (элемент верхнего уровня)
+def create_navigation_drawer():
     left_drawer = ui.left_drawer().classes("bg-blue-50")
     with left_drawer:
         with ui.column().classes("w-full p-4 gap-4"):
@@ -247,32 +111,169 @@ def chat_page():
                 with ui.item_section():
                     ui.label("Индексация")
 
-    # Верхняя панель (элемент верхнего уровня)
+            with ui.item(on_click=lambda: ui.navigate.to("/database")).classes(
+                "w-full"
+            ):
+                with ui.item_section().classes("items-center"):
+                    ui.icon("storage")
+                with ui.item_section():
+                    ui.label("База страниц")
+
+    return left_drawer
+
+
+def create_header(title: str):
     with ui.header().classes("bg-blue-600 text-white shadow-md"):
         with ui.row().classes("w-full items-center justify-between p-4"):
             with ui.row().classes("items-center gap-2"):
-                ui.icon("menu").on("click", lambda: left_drawer.toggle())
+                ui.button(icon="menu", on_click=lambda: None).props(
+                    "flat color=white"
+                ).classes("drawer-toggle")
+                ui.label(title).classes("text-xl font-bold")
+
+            with ui.row().classes("items-center gap-2"):
+                ui.button("Чат", on_click=lambda: ui.navigate.to("/")).props(
+                    "flat color=white"
+                )
+                ui.button(
+                    "Индексация", on_click=lambda: ui.navigate.to("/indexing")
+                ).props("flat color=white")
+                ui.button("База", on_click=lambda: ui.navigate.to("/database")).props(
+                    "flat color=white"
+                )
+
+
+@ui.page("/")
+def chat_page():
+    ui.page_title("Confluence RAG Chat")
+    ui.query("body").style("background-color: #f5f7fa;")
+
+    left_drawer = create_navigation_drawer()
+
+    with ui.header().classes("bg-blue-600 text-white shadow-md"):
+        with ui.row().classes("w-full items-center justify-between p-4"):
+            with ui.row().classes("items-center gap-2"):
+                ui.button(icon="menu", on_click=lambda: left_drawer.toggle()).props(
+                    "flat color=white"
+                )
                 ui.label("Confluence RAG Chat").classes("text-xl font-bold")
 
             with ui.row().classes("items-center gap-2"):
                 ui.button(
                     "Индексация", on_click=lambda: ui.navigate.to("/indexing")
                 ).props("flat color=white")
-                ui.button(
-                    "Настройки", on_click=lambda: ui.notify("Настройки в разработке")
-                ).props("flat color=white")
+                ui.button("База", on_click=lambda: ui.navigate.to("/database")).props(
+                    "flat color=white"
+                )
 
-    # Основной контент
-    with ui.column().classes("flex-grow p-4 overflow-auto"):
-        chat_container = ui.column().classes("w-full")
-
-        # Инициализация истории сообщений
+    def update_chat_history():
+        nonlocal messages
         messages = chat_history.copy()
-
-        # Обновляем отображение чата
         update_chat()
 
-        # Приветственное сообщение
+    def add_message(role: str, content: str):
+        chat_history.append({"role": role, "content": content})
+        update_chat_history()
+
+    def update_chat():
+        chat_container.clear()
+        with chat_container:
+            for msg in messages:
+                with ui.card().classes("w-full max-w-3xl mx-auto my-2"):
+                    with ui.row().classes("w-full items-start gap-3 p-3"):
+                        with ui.avatar(
+                            color="primary" if msg["role"] == "user" else "secondary"
+                        ).classes("shrink"):
+                            ui.icon("person" if msg["role"] == "user" else "smart_toy")
+
+                        with ui.column().classes("grow"):
+                            with ui.row().classes(
+                                "w-full justify-between items-center"
+                            ):
+                                ui.label(
+                                    "Вы" if msg["role"] == "user" else "Ассистент"
+                                ).classes("font-bold text-sm")
+                                ui.label("только что").classes("text-xs text-gray-500")
+
+                            ui.markdown(msg["content"]).classes("text-sm")
+
+    async def send_message():
+        question = question_input.value.strip()
+
+        if not question:
+            ui.notify("Введите вопрос", type="warning")
+            return
+
+        logger.info(f"Received new question: '{question}'")
+        question_input.value = ""
+        add_message("user", question)
+
+        spinner_container = None
+
+        try:
+            with chat_container:
+                spinner_container = ui.card().classes("w-full max-w-3xl mx-auto my-2")
+                with spinner_container:
+                    with ui.row().classes("w-full items-start gap-3 p-3"):
+                        with ui.avatar(color="secondary").classes("shrink"):
+                            ui.icon("smart_toy")
+                        with ui.column().classes("grow"):
+                            ui.label("Ассистент").classes("font-bold text-sm")
+
+            logger.info("Generating embedding for the question...")
+            question_embedding = await asyncio.to_thread(
+                embedding_service.embed, question
+            )
+
+            logger.info(
+                f"Searching in Qdrant for top_k={settings.top_k_results} results..."
+            )
+            search_results = await asyncio.to_thread(
+                qdrant_service.search,
+                query_embedding=question_embedding,
+                top_k=settings.top_k_results,
+            )
+
+            if not search_results:
+                logger.warning("No relevant information found in the knowledge base.")
+                answer = "Извините, я не нашел релевантной информации в базе знаний."
+            else:
+                logger.info(
+                    f"Found {len(search_results)} relevant chunks. Generating answer..."
+                )
+
+                conversation_history = "\n".join(
+                    [f"{msg['role']}: {msg['content']}" for msg in chat_history]
+                )
+
+                answer = await asyncio.to_thread(
+                    rag_service.generate_answer_with_history,
+                    question,
+                    search_results,
+                    conversation_history,
+                )
+
+                sources = rag_service.generate_sources_text(search_results)
+                if sources:
+                    answer += "\n\n" + sources
+
+            if spinner_container:
+                spinner_container.delete()
+            add_message("assistant", answer)
+
+        except Exception as e:
+            error_msg = f"An error occurred while processing your request: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            if spinner_container:
+                spinner_container.delete()
+            add_message("assistant", error_msg)
+            ui.notify(error_msg, type="negative")
+
+    with ui.column().classes("flex-grow p-4 overflow-auto"):
+        chat_container = ui.column().classes("w-full")
+        messages = chat_history.copy()
+        update_chat()
+
         if not messages:
             with chat_container:
                 with ui.card().classes("w-full max-w-3xl mx-auto my-2 bg-blue-50"):
@@ -283,18 +284,15 @@ def chat_page():
                                 "text-xl font-bold text-blue-600"
                             )
 
-                        ui.markdown(
-                            """
-                            Задайте вопрос по корпоративной документации, и я постараюсь найти для вас релевантную информацию.
+                        ui.markdown("""
+Задайте вопрос по корпоративной документации, и я постараюсь найти для вас релевантную информацию.
 
-                            **Примеры вопросов:**
-                            - Как настроить VPN?
-                            - Политика отпусков
-                            - Инструкции по установке ПО
-                            """
-                        ).classes("text-sm")
+**Примеры вопросов:**
+- Как настроить VPN?
+- Политика отпусков
+- Инструкции по установке ПО
+                        """).classes("text-sm")
 
-    # Поле ввода (элемент верхнего уровня)
     with ui.footer().classes("bg-white shadow-md p-4"):
         with ui.row().classes("w-full max-w-3xl mx-auto gap-2"):
             question_input = (
@@ -309,10 +307,28 @@ def chat_page():
 
 @ui.page("/indexing")
 def indexing_page():
-    """Страница индексации."""
+    ui.page_title("Индексация Confluence")
+    ui.query("body").style("background-color: #f5f7fa;")
+
+    left_drawer = create_navigation_drawer()
+
+    with ui.header().classes("bg-blue-600 text-white shadow-md"):
+        with ui.row().classes("w-full items-center justify-between p-4"):
+            with ui.row().classes("items-center gap-2"):
+                ui.button(icon="menu", on_click=lambda: left_drawer.toggle()).props(
+                    "flat color=white"
+                )
+                ui.label("Индексация страниц Confluence").classes("text-xl font-bold")
+
+            with ui.row().classes("items-center gap-2"):
+                ui.button("Чат", on_click=lambda: ui.navigate.to("/")).props(
+                    "flat color=white"
+                )
+                ui.button("База", on_click=lambda: ui.navigate.to("/database")).props(
+                    "flat color=white"
+                )
 
     async def index_page():
-        """Индексировать страницу Confluence."""
         page_id = page_id_input.value.strip()
 
         if not page_id:
@@ -326,7 +342,6 @@ def indexing_page():
         progress_bar.value = 0.1
 
         try:
-            # Получаем страницу
             logger.info(f"Fetching page {page_id} from Confluence...")
             progress_bar.value = 0.2
             page = await asyncio.to_thread(confluence_service.fetch_page, page_id)
@@ -337,7 +352,6 @@ def indexing_page():
                 progress_bar.set_visibility(False)
                 return
 
-            # Извлекаем данные
             logger.info("Extracting page data (title, text, etc.)...")
             progress_bar.value = 0.4
             status_label.text = "Обработка текста..."
@@ -345,7 +359,6 @@ def indexing_page():
                 confluence_service.extract_page_data, page
             )
 
-            # Чанкинг
             logger.info("Splitting page text into chunks...")
             progress_bar.value = 0.6
             status_label.text = "Разбиение на чанки..."
@@ -363,13 +376,11 @@ def indexing_page():
                 return
             logger.info(f"Created {len(chunks)} chunks.")
 
-            # Генерация эмбеддингов
             logger.info(f"Generating embeddings for {len(chunks)} chunks...")
             progress_bar.value = 0.8
             status_label.text = f"Генерация эмбеддингов ({len(chunks)} чанков)..."
             embeddings = await asyncio.to_thread(embedding_service.embed_batch, chunks)
 
-            # Загрузка в Qdrant
             logger.info(f"Upserting {len(chunks)} chunks and embeddings into Qdrant...")
             progress_bar.value = 0.9
             status_label.text = "Загрузка в базу..."
@@ -381,6 +392,7 @@ def indexing_page():
                     "title": page_data["title"],
                     "url": page_data["url"],
                     "page_id": page_data["page_id"],
+                    "version": page_data.get("version", 0),
                 },
             )
 
@@ -393,7 +405,6 @@ def indexing_page():
             status_label.text = f"Успешно проиндексировано {count} чанков!"
             ui.notify(success_msg, type="positive")
 
-            # Показываем детали индексации
             with ui.dialog() as details_dialog, ui.card().classes("w-full max-w-md"):
                 ui.label("Детали индексации").classes("text-h6")
                 with ui.column().classes("w-full gap-2"):
@@ -414,67 +425,93 @@ def indexing_page():
 
         finally:
             spinner.set_visibility(False)
-            # Через небольшую задержку скрываем прогресс-бар
             ui.timer(2.0, lambda: progress_bar.set_visibility(False), once=True)
 
-    # UI
-    ui.page_title("Индексация Confluence")
+    async def start_space_indexing():
+        space_key = space_input.value.strip()
 
-    # Добавляем стили для всей страницы
-    ui.query("body").style("background-color: #f5f7fa;")
+        if not space_key:
+            ui.notify("Введите Space Key", type="warning")
+            return
 
-    # Создаем боковую панель навигации (элемент верхнего уровня)
-    left_drawer = ui.left_drawer().classes("bg-blue-50")
-    with left_drawer:
-        with ui.column().classes("w-full p-4 gap-4"):
-            with ui.row().classes("items-center gap-2"):
-                ui.icon("chat").classes("text-2xl text-blue-600")
-                ui.label("Confluence RAG").classes("text-lg font-bold text-blue-600")
+        if indexing_service.is_running():
+            ui.notify("Индексация уже выполняется", type="warning")
+            return
 
-            ui.separator()
+        result = indexing_service.start_indexing_background(space_key)
 
-            with ui.item(on_click=lambda: ui.navigate.to("/")).classes("w-full"):
-                with ui.item_section().classes("items-center"):
-                    ui.icon("forum")
-                with ui.item_section():
-                    ui.label("Чат")
+        if result["success"]:
+            ui.notify("Индексация space запущена", type="positive")
+            start_space_btn.set_enabled(False)
+            stop_space_btn.set_enabled(True)
+            space_input.set_enabled(False)
+        else:
+            ui.notify(result["message"], type="negative")
 
-            with ui.item(on_click=lambda: ui.navigate.to("/indexing")).classes(
-                "w-full"
-            ):
-                with ui.item_section().classes("items-center"):
-                    ui.icon("upload_file")
-                with ui.item_section():
-                    ui.label("Индексация")
+    def stop_space_indexing():
+        indexing_service.stop()
+        ui.notify("Остановка индексации...", type="info")
 
-    # Верхняя панель (элемент верхнего уровня)
-    with ui.header().classes("bg-blue-600 text-white shadow-md"):
-        with ui.row().classes("w-full items-center justify-between p-4"):
-            with ui.row().classes("items-center gap-2"):
-                ui.icon("menu").on("click", lambda: left_drawer.toggle())
-                ui.label("Индексация страниц Confluence").classes("text-xl font-bold")
+    def update_progress_ui():
+        progress = indexing_service.get_progress()
 
-            with ui.row().classes("items-center gap-2"):
-                ui.button("Чат", on_click=lambda: ui.navigate.to("/")).props(
-                    "flat color=white"
-                )
+        space_progress_label.text = f"Space: {progress['space'] or 'N/A'}"
+        space_stats_label.text = (
+            f"Обработано: {progress['processed_pages']}/{progress['total_pages']} | "
+            f"Проиндексировано: {progress['indexed_pages']} | "
+            f"Пропущено: {progress['skipped_pages']} | "
+            f"Ошибок: {progress['failed_pages']}"
+        )
+        space_current_label.text = f"Текущая страница: {progress['current_page']}"
+
+        if progress["total_pages"] > 0:
+            space_progress_bar.value = progress["progress_percent"] / 100
+
+        status = progress["status"]
+
+        if status in ["completed", "stopped", "error"]:
+            start_space_btn.set_enabled(True)
+            stop_space_btn.set_enabled(False)
+            space_input.set_enabled(True)
+
+            if status == "completed":
+                ui.notify("Индексация space завершена", type="positive")
+            elif status == "stopped":
+                ui.notify("Индексация остановлена", type="info")
+            elif status == "error":
+                ui.notify(f"Ошибка: {progress['error_message']}", type="negative")
+
+    indexing_service.register_progress_callback(update_progress_ui)
+
+    async def clear_database():
+        with ui.dialog() as confirm_dialog, ui.card():
+            ui.label("Вы уверены, что хотите очистить всю базу данных?").classes(
+                "text-h6"
+            )
+            ui.label("Это действие необратимо!").classes("text-red-600")
+            with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                ui.button("Отмена", on_click=confirm_dialog.close).props("flat")
                 ui.button(
-                    "Настройки", on_click=lambda: ui.notify("Настройки в разработке")
-                ).props("flat color=white")
+                    "Очистить", on_click=lambda: perform_clear(confirm_dialog)
+                ).props("color=red")
 
-    # Контент страницы
+        confirm_dialog.open()
+
+    async def perform_clear(dialog):
+        dialog.close()
+        try:
+            success = await asyncio.to_thread(qdrant_service.clear_collection)
+            if success:
+                ui.notify("База данных очищена", type="positive")
+            else:
+                ui.notify("Ошибка очистки базы данных", type="negative")
+        except Exception as e:
+            ui.notify(f"Ошибка: {str(e)}", type="negative")
+
     with ui.column().classes("flex-grow p-4"):
-        with ui.card().classes("w-full max-w-3xl mx-auto p-6"):
+        with ui.card().classes("w-full max-w-3xl mx-auto p-6 mb-4"):
             with ui.column().classes("gap-4"):
-                ui.markdown(
-                    """
-                    ### Индексация страницы Confluence
-
-                    Введите Page ID страницы для индексации в векторную базу данных.
-
-                    Page ID
-                                        """
-                )
+                ui.markdown("### Индексация одной страницы")
 
                 with ui.row().classes("w-full gap-2"):
                     page_id_input = (
@@ -487,34 +524,190 @@ def indexing_page():
                         'fab color=blue-6 icon="upload"'
                     )
 
-                # Прогресс-бар
                 progress_bar = ui.linear_progress().props("color=blue-6")
                 progress_bar.set_visibility(False)
 
-                # Статус и спиннер
                 with ui.row().classes("items-center gap-2"):
                     spinner = ui.spinner(size="sm")
                     spinner.set_visibility(False)
                     status_label = ui.label("").classes("text-sm text-gray-600")
 
-                # Дополнительная информация
+        with ui.card().classes("w-full max-w-3xl mx-auto p-6 mb-4"):
+            with ui.column().classes("gap-4"):
+                ui.markdown("### Индексация всего Space")
+
+                with ui.row().classes("w-full gap-2 items-end"):
+                    space_input = (
+                        ui.input(label="Space Key", placeholder="MYSPACE")
+                        .props("outlined clearable")
+                        .classes("flex-grow")
+                    )
+
+                    start_space_btn = ui.button(
+                        "Запустить", on_click=start_space_indexing
+                    ).props("color=green")
+                    stop_space_btn = ui.button(
+                        "Остановить", on_click=stop_space_indexing
+                    ).props("color=red")
+                    stop_space_btn.set_enabled(False)
+
+                space_progress_bar = ui.linear_progress().props("color=green")
+                space_progress_label = ui.label("Space: N/A").classes(
+                    "text-sm font-bold"
+                )
+                space_stats_label = ui.label(
+                    "Обработано: 0/0 | Проиндексировано: 0 | Пропущено: 0 | Ошибок: 0"
+                ).classes("text-sm")
+                space_current_label = ui.label("Текущая страница: N/A").classes(
+                    "text-sm text-gray-600"
+                )
+
+        with ui.card().classes("w-full max-w-3xl mx-auto p-6"):
+            with ui.column().classes("gap-4"):
+                ui.markdown("### Управление базой данных")
+
+                ui.button("Очистить всю базу данных", on_click=clear_database).props(
+                    "color=red icon=delete"
+                )
+
                 with ui.expansion("Дополнительная информация").props('icon="info"'):
-                    ui.markdown(
-                        """
-                        **Что происходит при индексации:**
+                    ui.markdown("""
+**Индексация одной страницы:**
+- Введите Page ID для индексации отдельной страницы
 
-                        1. Загрузка страницы из Confluence
-                        2. Извлечение текстового содержимого
-                        3. Разбиение текста на чанки
-                        4. Создание векторных представлений (эмбеддингов)
-                        5. Сохранение в векторную базу данных
+**Индексация всего Space:**
+- Автоматически индексирует все страницы в указанном Space
+- Инкрементальная: пропускает уже проиндексированные страницы
+- Может быть остановлена в любой момент
+- Не блокирует работу чата
 
-                        После индексации вы сможете задавать вопросы по содержимому страницы в чате.
-                        """
-                    ).classes("text-sm")
+**Очистка базы:**
+- Полностью удаляет все проиндексированные данные
+- Действие необратимо
+                    """).classes("text-sm")
 
 
-# Монтируем NiceGUI на FastAPI
+@ui.page("/database")
+def database_page():
+    ui.page_title("База проиндексированных страниц")
+    ui.query("body").style("background-color: #f5f7fa;")
+
+    left_drawer = create_navigation_drawer()
+
+    with ui.header().classes("bg-blue-600 text-white shadow-md"):
+        with ui.row().classes("w-full items-center justify-between p-4"):
+            with ui.row().classes("items-center gap-2"):
+                ui.button(icon="menu", on_click=lambda: left_drawer.toggle()).props(
+                    "flat color=white"
+                )
+                ui.label("База проиндексированных страниц").classes("text-xl font-bold")
+
+            with ui.row().classes("items-center gap-2"):
+                ui.button("Чат", on_click=lambda: ui.navigate.to("/")).props(
+                    "flat color=white"
+                )
+                ui.button(
+                    "Индексация", on_click=lambda: ui.navigate.to("/indexing")
+                ).props("flat color=white")
+
+    async def load_pages():
+        try:
+            pages = await asyncio.to_thread(qdrant_service.get_all_indexed_pages)
+            return pages
+        except Exception as e:
+            logger.error(f"Error loading pages: {e}")
+            ui.notify("Ошибка загрузки страниц", type="negative")
+            return []
+
+    async def search_pages():
+        query = search_input.value.strip()
+
+        if not query:
+            pages = await load_pages()
+        else:
+            try:
+                pages = await asyncio.to_thread(
+                    qdrant_service.search_indexed_pages, query
+                )
+            except Exception as e:
+                logger.error(f"Error searching pages: {e}")
+                ui.notify("Ошибка поиска", type="negative")
+                pages = []
+
+        display_pages(pages)
+
+    def display_pages(pages):
+        results_container.clear()
+
+        with results_container:
+            if not pages:
+                ui.label("Страницы не найдены").classes("text-gray-500 text-center p-4")
+                return
+
+            ui.label(f"Найдено страниц: {len(pages)}").classes("text-sm font-bold mb-4")
+
+            for page in pages:
+                with ui.card().classes("w-full mb-2 hover:shadow-lg transition-shadow"):
+                    with ui.row().classes("w-full items-start gap-3 p-3"):
+                        ui.icon("description").classes("text-blue-600 text-2xl")
+
+                        with ui.column().classes("grow"):
+                            if page.get("url"):
+                                ui.link(
+                                    page["title"], page["url"], new_tab=True
+                                ).classes("text-lg font-bold text-blue-600")
+                            else:
+                                ui.label(page["title"]).classes("text-lg font-bold")
+
+                            ui.label(f"ID: {page['page_id']}").classes(
+                                "text-xs text-gray-500"
+                            )
+                            ui.label(f"Версия: {page.get('version', 'N/A')}").classes(
+                                "text-xs text-gray-500"
+                            )
+
+    async def refresh_pages():
+        refresh_btn.set_enabled(False)
+        pages = await load_pages()
+        display_pages(pages)
+
+        stats = await asyncio.to_thread(qdrant_service.get_collection_stats)
+        stats_label.text = f"Всего чанков в базе: {stats['points_count']}"
+
+        refresh_btn.set_enabled(True)
+        ui.notify("Данные обновлены", type="positive")
+
+    with ui.column().classes("flex-grow p-4"):
+        with ui.card().classes("w-full max-w-4xl mx-auto p-6"):
+            with ui.column().classes("gap-4"):
+                ui.markdown("### Поиск по базе страниц")
+
+                with ui.row().classes("w-full gap-2"):
+                    search_input = (
+                        ui.input(placeholder="Введите название страницы или Page ID...")
+                        .props("outlined clearable")
+                        .classes("flex-grow")
+                        .on("keydown.enter", search_pages)
+                    )
+
+                    ui.button("Поиск", on_click=search_pages).props(
+                        "color=blue-6 icon=search"
+                    )
+                    refresh_btn = ui.button("Обновить", on_click=refresh_pages).props(
+                        "color=green icon=refresh"
+                    )
+
+                stats_label = ui.label("Загрузка статистики...").classes(
+                    "text-sm text-gray-600"
+                )
+
+                ui.separator()
+
+                results_container = ui.column().classes("w-full gap-2")
+
+    ui.timer(0.1, refresh_pages, once=True)
+
+
 ui.run_with(app, mount_path="/", storage_secret="change-this-secret-key-in-production")
 
 if __name__ == "__main__":
@@ -522,4 +715,3 @@ if __name__ == "__main__":
 
     logger.info("Starting Uvicorn server...")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
-
