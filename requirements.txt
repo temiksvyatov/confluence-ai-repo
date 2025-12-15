@@ -16,6 +16,12 @@ html2text
 sentence-transformers
 torch
 
+# Reranking
+FlagEmbedding
+
+# Tokenization
+tiktoken
+
 # Vector DB
 qdrant-client
 

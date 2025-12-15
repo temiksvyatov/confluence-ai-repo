@@ -1,88 +1,187 @@
-from typing import List
 import logging
-from sentence_transformers import SentenceTransformer
-import re
+from typing import List
 
-# Set up a logger for this module
+from sentence_transformers import SentenceTransformer
+
 logger = logging.getLogger(__name__)
 
+
 class EmbeddingService:
-    """Сервис для генерации эмбеддингов текста."""
-    
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str = "BAAI/bge-m3"):
         """
-        Инициализация модели эмбеддингов.
-        
+        Инициализация модели эмбеддингов с поддержкой префиксов.
+
         Args:
             model_name: Название модели sentence-transformers
+                Рекомендуемые модели:
+                - BAAI/bge-m3 (мультиязычная, SOTA)
+                - BAAI/bge-large-en-v1.5 (английская, высокая точность)
+                - intfloat/multilingual-e5-large (мультиязычная E5)
         """
         logger.info(f"Loading embedding model: {model_name}...")
         self.model = SentenceTransformer(model_name)
-        logger.info("Embedding model loaded successfully")
-    def embed(self, text: str) -> List[float]:
+        self.model_name = model_name
+
+        # Определяем тип модели и нужные префиксы
+        self._setup_prefixes()
+
+        logger.info(f"Embedding model loaded successfully: {model_name}")
+        logger.info(
+            f"Using prefixes - Query: '{self.query_prefix}', Passage: '{self.passage_prefix}'"
+        )
+
+    def _setup_prefixes(self):
+        """Настроить префиксы в зависимости от типа модели."""
+        model_lower = self.model_name.lower()
+
+        if "bge" in model_lower:
+            # BGE модели требуют префиксы для оптимальной работы
+            self.query_prefix = "Представьте запрос для поиска релевантных документов: "
+            self.passage_prefix = ""
+            self.use_prefixes = True
+            logger.info("Detected BGE model - using instruction prefixes")
+
+        elif "e5" in model_lower:
+            # E5 модели также используют префиксы
+            self.query_prefix = "query: "
+            self.passage_prefix = "passage: "
+            self.use_prefixes = True
+            logger.info("Detected E5 model - using query/passage prefixes")
+
+        else:
+            # Другие модели не требуют префиксов
+            self.query_prefix = ""
+            self.passage_prefix = ""
+            self.use_prefixes = False
+            logger.info("Generic model detected - no prefixes used")
+
+    def embed_query(self, query: str) -> List[float]:
         """
-        Получить эмбеддинг для текста.
-        
+        Получить эмбеддинг для запроса.
+
         Args:
-            text: Текст для эмбеддинга
-            
+            query: Запрос пользователя
+
         Returns:
             Вектор эмбеддинга
         """
-        logger.debug(f"Generating embedding for text of length {len(text)} characters...")
-        embedding = self.model.encode(text, convert_to_tensor=False)
-        logger.debug("Embedding generated successfully")
+        if self.use_prefixes:
+            query = self.query_prefix + query
+
+        logger.debug(
+            f"Generating query embedding for text of length {len(query)} characters..."
+        )
+        embedding = self.model.encode(
+            query, convert_to_tensor=False, normalize_embeddings=True
+        )
+        logger.debug("Query embedding generated successfully")
         return embedding.tolist()
-    
-    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+
+    def embed_passage(self, text: str) -> List[float]:
         """
-        Получить эмбеддинги для батча текстов.
-        
+        Получить эмбеддинг для документа/отрывка.
+
         Args:
-            texts: Список текстов
-            
+            text: Текст документа
+
+        Returns:
+            Вектор эмбеддинга
+        """
+        if self.use_prefixes:
+            text = self.passage_prefix + text
+
+        logger.debug(
+            f"Generating passage embedding for text of length {len(text)} characters..."
+        )
+        embedding = self.model.encode(
+            text, convert_to_tensor=False, normalize_embeddings=True
+        )
+        logger.debug("Passage embedding generated successfully")
+        return embedding.tolist()
+
+    def embed(self, text: str, is_query: bool = False) -> List[float]:
+        """
+        Получить эмбеддинг для текста с автоматическим определением типа.
+
+        Args:
+            text: Текст для эмбеддинга
+            is_query: True если это запрос, False если документ
+
+        Returns:
+            Вектор эмбеддинга
+        """
+        if is_query:
+            return self.embed_query(text)
+        else:
+            return self.embed_passage(text)
+
+    def embed_batch_passages(self, texts: List[str]) -> List[List[float]]:
+        """
+        Получить эмбеддинги для батча документов.
+
+        Args:
+            texts: Список текстов документов
+
         Returns:
             Список векторов эмбеддингов
         """
-        logger.info(f"Generating embeddings for batch of {len(texts)} texts...")
-        embeddings = self.model.encode(texts, convert_to_tensor=False, show_progress_bar=True)
-        logger.info("Embeddings generated successfully")
+        logger.info(f"Generating embeddings for batch of {len(texts)} passages...")
+
+        if self.use_prefixes:
+            texts = [self.passage_prefix + text for text in texts]
+
+        embeddings = self.model.encode(
+            texts,
+            convert_to_tensor=False,
+            show_progress_bar=True,
+            normalize_embeddings=True,
+        )
+        logger.info("Batch embeddings generated successfully")
         return [emb.tolist() for emb in embeddings]
-    
-    def chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
+
+    def embed_batch_queries(self, queries: List[str]) -> List[List[float]]:
         """
-        Разбить текст на чанки по словам с перекрытием.
-        
+        Получить эмбеддинги для батча запросов.
+
         Args:
-            text: Исходный текст
-            chunk_size: Размер чанка в словах
-            overlap: Перекрытие между чанками в словах
-            
+            queries: Список запросов
+
         Returns:
-            Список чанков
+            Список векторов эмбеддингов
         """
-        logger.info(f"Chunking text of length {len(text)} characters...")
-        # Разбиваем на слова
-        words = re.findall(r'\S+', text)
-        
-        if len(words) <= chunk_size:
-            logger.debug(f"Text is shorter than chunk size ({len(words)} <= {chunk_size}). Returning single chunk.")
-            return [text]
-        
-        chunks = []
-        start = 0
-        
-        while start < len(words):
-            end = start + chunk_size
-            chunk_words = words[start:end]
-            chunks.append(' '.join(chunk_words))
-            
-            # Двигаемся с учетом overlap
-            start += chunk_size - overlap
-            
-            # Если остался маленький кусок, добавляем его и завершаем
-            if end >= len(words):
-                break
-        
-        logger.info(f"Successfully created {len(chunks)} chunks")
-        return chunks
+        logger.info(f"Generating embeddings for batch of {len(queries)} queries...")
+
+        if self.use_prefixes:
+            queries = [self.query_prefix + query for query in queries]
+
+        embeddings = self.model.encode(
+            queries,
+            convert_to_tensor=False,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        logger.info("Batch query embeddings generated successfully")
+        return [emb.tolist() for emb in embeddings]
+
+    def get_embedding_dimension(self) -> int:
+        """
+        Получить размерность эмбеддингов модели.
+
+        Returns:
+            Размерность векторов
+        """
+        return self.model.get_sentence_embedding_dimension()
+
+    def encode_for_retrieval(self, text: str, is_query: bool = False) -> List[float]:
+        """
+        Унифицированный метод кодирования для retrieval.
+        Алиас для embed() для обратной совместимости.
+
+        Args:
+            text: Текст для кодирования
+            is_query: True для запроса, False для документа
+
+        Returns:
+            Вектор эмбеддинга
+        """
+        return self.embed(text, is_query=is_query)

@@ -21,15 +21,19 @@ class IndexingService:
         self,
         confluence_service,
         embedding_service,
+        chunking_service,
         qdrant_service,
         chunk_size: int,
         chunk_overlap: int,
+        chunking_strategy: str = "semantic",
     ):
         self.confluence_service = confluence_service
         self.embedding_service = embedding_service
+        self.chunking_service = chunking_service
         self.qdrant_service = qdrant_service
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.chunking_strategy = chunking_strategy
 
         self.status = IndexingStatus.IDLE
         self.should_stop = False
@@ -179,27 +183,44 @@ class IndexingService:
                         self.confluence_service.extract_page_data, full_page
                     )
 
-                    chunks = await asyncio.to_thread(
-                        self.embedding_service.chunk_text,
-                        page_data["text"],
-                        self.chunk_size,
-                        self.chunk_overlap,
-                    )
+                    # Используем новый chunking сервис
+                    if self.chunking_strategy == "semantic":
+                        chunks_data = await asyncio.to_thread(
+                            self.chunking_service.chunk_text_semantic,
+                            page_data["text"],
+                            page_data["title"],
+                            page_data,
+                            self.chunk_size,
+                            self.chunk_overlap,
+                        )
+                    else:
+                        chunks_data = await asyncio.to_thread(
+                            self.chunking_service.chunk_text_with_context,
+                            page_data["text"],
+                            page_data["title"],
+                            page_data,
+                            self.chunk_size,
+                            self.chunk_overlap,
+                        )
 
-                    if not chunks:
+                    if not chunks_data:
                         logger.warning(f"No chunks created for page {page_id}")
                         self.failed_pages += 1
                         self.processed_pages += 1
                         self._notify_progress()
                         continue
 
+                    # Извлекаем тексты чанков
+                    chunk_texts = [chunk["text"] for chunk in chunks_data]
+
+                    # Генерируем эмбеддинги для пассажей (не запросов!)
                     embeddings = await asyncio.to_thread(
-                        self.embedding_service.embed_batch, chunks
+                        self.embedding_service.embed_batch_passages, chunk_texts
                     )
 
                     await asyncio.to_thread(
                         self.qdrant_service.upsert_chunks,
-                        chunks,
+                        chunk_texts,
                         embeddings,
                         {
                             "title": page_data["title"],
@@ -210,7 +231,9 @@ class IndexingService:
                     )
 
                     self.indexed_pages += 1
-                    logger.info(f"Successfully indexed page {page_id}: {page_title}")
+                    logger.info(
+                        f"Successfully indexed page {page_id}: {page_title} ({len(chunks_data)} chunks)"
+                    )
 
                 except Exception as e:
                     logger.error(f"Error indexing page {page_id}: {e}", exc_info=True)
