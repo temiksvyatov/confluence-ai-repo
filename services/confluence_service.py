@@ -10,26 +10,28 @@ logger = logging.getLogger(__name__)
 
 class ConfluenceService:
     def __init__(self, url: str, username: str, api_token: str):
-        logger.info(f"🔌 Инициализация клиента Confluence: {url}")
+        logger.info(f"[Confluence] Initializing client: {url}")
         self.client = Confluence(
             url=url, username=username, token=api_token, cloud=False
         )
-        logger.info("🔌 Клиент Confluence создан.")
+        logger.info("[Confluence] Client created")
 
     def fetch_page(self, page_id: str) -> Optional[Dict]:
-        logger.info(f"📄 Запрос страницы Confluence: {page_id}")
+        logger.info(f"[Confluence] Fetching page: {page_id}")
         try:
             page = self.client.get_page_by_id(
                 page_id=page_id, expand="body.storage,version"
             )
-            logger.info(f"✅ Страница {page_id} успешно получена.")
+            logger.info(f"[Confluence] Page {page_id} fetched successfully")
             return page
         except Exception as e:
-            logger.error(f"❌ Ошибка получения страницы {page_id}: {e}", exc_info=True)
+            logger.error(
+                f"[Confluence] Error fetching page {page_id}: {e}", exc_info=True
+            )
             return None
 
     def get_all_pages_from_space(self, space_key: str, limit: int = 100) -> List[Dict]:
-        logger.info(f"📚 Получение всех страниц из space: {space_key}")
+        logger.info(f"[Confluence] Getting all pages from space: {space_key}")
         all_pages = []
         start = 0
 
@@ -45,21 +47,21 @@ class ConfluenceService:
                     break
 
                 all_pages.extend(pages)
-                logger.info(f"Получено {len(pages)} страниц (всего: {len(all_pages)})")
+                logger.info(
+                    f"[Confluence] Retrieved {len(pages)} pages (total: {len(all_pages)})"
+                )
 
                 if len(pages) < limit:
                     break
 
                 start += limit
 
-            logger.info(
-                f"✅ Всего получено {len(all_pages)} страниц из space {space_key}"
-            )
+            logger.info(f"[Confluence] Total pages from {space_key}: {len(all_pages)}")
             return all_pages
 
         except Exception as e:
             logger.error(
-                f"❌ Ошибка получения страниц из space {space_key}: {e}", exc_info=True
+                f"[Confluence] Error getting pages from {space_key}: {e}", exc_info=True
             )
             return []
 
@@ -74,11 +76,11 @@ class ConfluenceService:
                 }
             return None
         except Exception as e:
-            logger.error(f"Ошибка получения информации о странице {page_id}: {e}")
+            logger.error(f"[Confluence] Error getting info for {page_id}: {e}")
             return None
 
     def clean_html(self, html_content: str) -> str:
-        logger.debug("Очистка HTML контента...")
+        logger.debug("[Confluence] Cleaning HTML content")
         soup = BeautifulSoup(html_content, "html.parser")
 
         for script in soup(["script", "style"]):
@@ -88,11 +90,11 @@ class ConfluenceService:
         text = re.sub(r"\n\s*\n", "\n\n", text)
         text = re.sub(r" +", " ", text)
 
-        logger.debug("HTML контент успешно очищен")
+        logger.debug("[Confluence] HTML cleaned")
         return text.strip()
 
     def extract_page_data(self, page: Dict) -> Dict[str, str]:
-        logger.info(f"Извлечение данных со страницы {page.get('id')}")
+        logger.info(f"[Confluence] Extracting data from page {page.get('id')}")
         title = page.get("title", "Без названия")
         html_content = page.get("body", {}).get("storage", {}).get("value", "")
         text = self.clean_html(html_content)
@@ -101,7 +103,7 @@ class ConfluenceService:
         web_ui = page.get("_links", {}).get("webui", "")
         url = f"{base_url}{web_ui}" if base_url and web_ui else ""
 
-        logger.info(f"Данные со страницы {page.get('id')} успешно извлечены")
+        logger.info(f"[Confluence] Data extracted from {page.get('id')}")
         return {
             "title": title,
             "text": text,

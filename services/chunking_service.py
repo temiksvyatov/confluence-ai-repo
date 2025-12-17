@@ -9,40 +9,26 @@ class ChunkingService:
     def __init__(
         self, model_name: str = "cl100k_base", local_tiktoken_path: str = None
     ):
-        """
-        Инициализация сервиса чанкинга с токенизацией.
-
-        Args:
-            model_name: Название модели токенизации (cl100k_base для GPT-4/3.5)
-            local_tiktoken_path: Путь к локальному .tiktoken файлу (для закрытых контуров)
-        """
-        logger.info(f"Initializing chunking service with tokenizer: {model_name}")
+        logger.info(f"[Chunking] Initializing with tokenizer: {model_name}")
         self.tokenizer = None
         self.use_simple_tokenizer = False
 
-        # Пытаемся загрузить tiktoken
         try:
             import tiktoken
 
-            # Если указан локальный путь, загружаем из него
             if local_tiktoken_path:
                 if os.path.exists(local_tiktoken_path):
-                    logger.info(
-                        f"Loading tokenizer from local file: {local_tiktoken_path}"
-                    )
+                    logger.info(f"[Chunking] Loading from: {local_tiktoken_path}")
                     self.tokenizer = self._load_local_tokenizer(
                         local_tiktoken_path, model_name, tiktoken
                     )
-                    logger.info("✅ Tokenizer loaded from local file successfully")
+                    logger.info("[Chunking] Tokenizer loaded from local file")
                 else:
-                    logger.error(
-                        f"❌ Local tokenizer file not found: {local_tiktoken_path}"
-                    )
+                    logger.error(f"[Chunking] File not found: {local_tiktoken_path}")
                     raise FileNotFoundError(
                         f"Tokenizer file not found: {local_tiktoken_path}"
                     )
             else:
-                # Пытаемся загрузить из стандартных мест
                 default_paths = [
                     f"/app/tokenizers/{model_name}.tiktoken",
                     f"/app/.cache/tiktoken/{model_name}.tiktoken",
@@ -53,73 +39,53 @@ class ChunkingService:
                 loaded = False
                 for path in default_paths:
                     if os.path.exists(path):
-                        logger.info(f"Found tokenizer at: {path}")
+                        logger.info(f"[Chunking] Found tokenizer at: {path}")
                         try:
                             self.tokenizer = self._load_local_tokenizer(
                                 path, model_name, tiktoken
                             )
-                            logger.info(f"✅ Loaded tokenizer from: {path}")
+                            logger.info(f"[Chunking] Loaded from: {path}")
                             loaded = True
                             break
                         except Exception as e:
-                            logger.warning(f"Failed to load from {path}: {e}")
+                            logger.warning(
+                                f"[Chunking] Failed to load from {path}: {e}"
+                            )
                             continue
 
-                # Если не нашли локально, пытаемся загрузить через интернет
                 if not loaded:
-                    logger.info(
-                        "No local tokenizer found, attempting online download..."
-                    )
+                    logger.info("[Chunking] Attempting online download")
                     self.tokenizer = tiktoken.get_encoding(model_name)
-                    logger.info("✅ Tokenizer loaded from online successfully")
+                    logger.info("[Chunking] Tokenizer loaded online")
 
         except ImportError:
-            logger.warning(
-                "⚠️  tiktoken not installed, using simple word-based tokenizer"
-            )
+            logger.warning("[Chunking] tiktoken not installed, using simple tokenizer")
             self.use_simple_tokenizer = True
         except Exception as e:
-            logger.warning(f"⚠️  Failed to load tiktoken: {e}")
-            logger.info("Falling back to simple word-based tokenizer")
+            logger.warning(f"[Chunking] Failed to load tiktoken: {e}")
+            logger.info("[Chunking] Fallback to simple tokenizer")
             self.use_simple_tokenizer = True
 
         if self.use_simple_tokenizer:
-            logger.info(
-                "Using simple tokenizer with ~1.4 tokens per word approximation"
-            )
+            logger.info("[Chunking] Using simple tokenizer (~1.4 tokens/word)")
 
     def _load_local_tokenizer(self, filepath: str, model_name: str, tiktoken_module):
-        """
-        Загрузить tokenizer из локального файла.
-
-        Args:
-            filepath: Путь к .tiktoken файлу (бинарный формат!)
-            model_name: Имя модели
-            tiktoken_module: Импортированный модуль tiktoken
-
-        Returns:
-            Encoding объект
-        """
         import base64
 
         from tiktoken.core import Encoding
 
-        logger.info(f"Reading tokenizer file: {filepath}")
+        logger.info(f"[Chunking] Reading tokenizer file: {filepath}")
 
-        # Читаем файл
         with open(filepath, "rb") as f:
             contents = f.read()
 
-        logger.info(f"File size: {len(contents)} bytes")
+        logger.info(f"[Chunking] File size: {len(contents)} bytes")
 
-        # Парсим файл
-        # Формат: каждая строка "base64_token rank"
         mergeable_ranks = {}
 
         try:
-            # Пробуем парсить как текстовый файл (base64 построчно)
             lines = contents.decode("utf-8").strip().split("\n")
-            logger.info(f"Parsing text format file with {len(lines)} lines")
+            logger.info(f"[Chunking] Parsing {len(lines)} lines")
 
             for line in lines:
                 if not line.strip():
@@ -135,30 +101,20 @@ class ChunkingService:
                     rank = int(rank_str)
                     mergeable_ranks[token_bytes] = rank
                 except Exception as e:
-                    logger.debug(f"Failed to parse line: {line[:50]}... - {e}")
+                    logger.debug(
+                        f"[Chunking] Failed to parse line: {line[:50]}... - {e}"
+                    )
                     continue
 
-            logger.info(
-                f"Successfully parsed {len(mergeable_ranks)} tokens from text format"
-            )
+            logger.info(f"[Chunking] Parsed {len(mergeable_ranks)} tokens")
 
         except UnicodeDecodeError:
-            # Это бинарный файл - ошибка в документации или формате
-            logger.error(
-                "File appears to be in binary format, but expected text format"
-            )
-            logger.error("Please ensure the file is in the correct format:")
-            logger.error("Each line should be: base64_token rank")
-            logger.error("Example: IQ== 0")
-            raise ValueError(
-                "Invalid tiktoken file format. "
-                "File should be text with lines: 'base64_token rank'"
-            )
+            logger.error("[Chunking] File in binary format, expected text")
+            raise ValueError("Invalid tiktoken file format")
 
         if not mergeable_ranks:
-            raise ValueError(f"Failed to parse any tokens from {filepath}")
+            raise ValueError(f"Failed to parse tokens from {filepath}")
 
-        # Специальные токены для cl100k_base (GPT-4, GPT-3.5-turbo)
         if model_name == "cl100k_base":
             special_tokens = {
                 "<|endoftext|>": 100257,
@@ -178,7 +134,6 @@ class ChunkingService:
             special_tokens = {}
             pat_str = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-        # Создаем Encoding объект
         encoding = Encoding(
             name=model_name,
             pat_str=pat_str,
@@ -186,20 +141,10 @@ class ChunkingService:
             special_tokens=special_tokens,
         )
 
-        logger.info(f"✅ Successfully created Encoding for {model_name}")
-
+        logger.info(f"[Chunking] Created Encoding for {model_name}")
         return encoding
 
     def count_tokens(self, text: str) -> int:
-        """
-        Подсчитать количество токенов в тексте.
-
-        Args:
-            text: Текст для подсчета
-
-        Returns:
-            Количество токенов
-        """
         return len(self.tokenizer.encode(text))
 
     def chunk_text_with_context(
@@ -210,42 +155,24 @@ class ChunkingService:
         chunk_size: int = 512,
         overlap: int = 50,
     ) -> List[Dict[str, str]]:
-        """
-        Разбить текст на чанки по токенам с добавлением контекста страницы.
-
-        Args:
-            text: Исходный текст страницы
-            page_title: Заголовок страницы
-            page_metadata: Метаданные (url, page_id, version)
-            chunk_size: Размер чанка в токенах
-            overlap: Перекрытие между чанками в токенах
-
-        Returns:
-            Список словарей с чанками и метаданными
-        """
-        logger.info(f"Chunking text from page '{page_title}'...")
+        logger.info(f"[Chunking] Processing page '{page_title}'")
         logger.info(
-            f"Text length: {len(text)} characters, ~{self.count_tokens(text)} tokens"
+            f"[Chunking] Text: {len(text)} chars, ~{self.count_tokens(text)} tokens"
         )
 
-        # Создаем контекстный префикс для каждого чанка
         context_prefix = f"Документ: {page_title}\n\n"
         context_prefix_tokens = self.count_tokens(context_prefix)
 
-        # Уменьшаем размер чанка на размер префикса
         effective_chunk_size = chunk_size - context_prefix_tokens
 
         if effective_chunk_size <= 0:
-            logger.error(
-                f"Chunk size {chunk_size} too small for context prefix ({context_prefix_tokens} tokens)"
-            )
+            logger.error(f"[Chunking] Chunk size {chunk_size} too small")
             effective_chunk_size = chunk_size // 2
 
-        # Токенизируем весь текст
         tokens = self.tokenizer.encode(text)
 
         if len(tokens) <= effective_chunk_size:
-            logger.debug("Text is shorter than chunk size. Creating single chunk.")
+            logger.debug("[Chunking] Single chunk")
             full_text = context_prefix + text
             return [
                 {
@@ -265,7 +192,6 @@ class ChunkingService:
             chunk_tokens = tokens[start:end]
             chunk_text = self.tokenizer.decode(chunk_tokens)
 
-            # Добавляем контекст страницы
             full_chunk_text = context_prefix + chunk_text
 
             chunks.append(
@@ -283,9 +209,9 @@ class ChunkingService:
             if end >= len(tokens):
                 break
 
-        logger.info(f"Successfully created {len(chunks)} chunks with context")
+        avg_tokens = sum(int(c["token_count"]) for c in chunks) / len(chunks)
         logger.info(
-            f"Average chunk size: {sum(int(c['token_count']) for c in chunks) / len(chunks):.0f} tokens"
+            f"[Chunking] Created {len(chunks)} chunks, avg {avg_tokens:.0f} tokens"
         )
 
         return chunks
@@ -299,27 +225,12 @@ class ChunkingService:
         overlap: int = 50,
         min_chunk_size: int = 100,
     ) -> List[Dict[str, str]]:
-        """
-        Разбить текст на чанки с учетом смысловых границ (параграфы, предложения).
-
-        Args:
-            text: Исходный текст страницы
-            page_title: Заголовок страницы
-            page_metadata: Метаданные
-            chunk_size: Максимальный размер чанка в токенах
-            overlap: Перекрытие между чанками в токенах
-            min_chunk_size: Минимальный размер чанка в токенах
-
-        Returns:
-            Список словарей с чанками и метаданными
-        """
-        logger.info(f"Semantic chunking for page '{page_title}'...")
+        logger.info(f"[Chunking] Semantic chunking for '{page_title}'")
 
         context_prefix = f"Документ: {page_title}\n\n"
         context_prefix_tokens = self.count_tokens(context_prefix)
         effective_chunk_size = chunk_size - context_prefix_tokens
 
-        # Разбиваем на параграфы
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
 
         chunks = []
@@ -330,9 +241,7 @@ class ChunkingService:
         for paragraph in paragraphs:
             para_tokens = self.count_tokens(paragraph)
 
-            # Если параграф сам по себе больше chunk_size, разбиваем его
             if para_tokens > effective_chunk_size:
-                # Сохраняем текущий чанк если есть
                 if current_chunk:
                     chunk_text = context_prefix + "\n\n".join(current_chunk)
                     chunks.append(
@@ -347,7 +256,6 @@ class ChunkingService:
                     current_chunk = []
                     current_tokens = 0
 
-                # Разбиваем большой параграф на предложения
                 sentences = [s.strip() + "." for s in paragraph.split(".") if s.strip()]
                 for sentence in sentences:
                     sent_tokens = self.count_tokens(sentence)
@@ -367,7 +275,6 @@ class ChunkingService:
                         )
                         chunk_index += 1
 
-                        # Добавляем overlap
                         if len(current_chunk) > 1:
                             current_chunk = [current_chunk[-1]]
                             current_tokens = self.count_tokens(current_chunk[0])
@@ -378,7 +285,6 @@ class ChunkingService:
                     current_chunk.append(sentence)
                     current_tokens += sent_tokens
 
-            # Если добавление параграфа превысит размер, сохраняем текущий чанк
             elif current_tokens + para_tokens > effective_chunk_size and current_chunk:
                 chunk_text = context_prefix + "\n\n".join(current_chunk)
                 chunks.append(
@@ -391,7 +297,6 @@ class ChunkingService:
                 )
                 chunk_index += 1
 
-                # Добавляем overlap
                 if len(current_chunk) > 1:
                     current_chunk = [current_chunk[-1]]
                     current_tokens = self.count_tokens(current_chunk[0])
@@ -406,7 +311,6 @@ class ChunkingService:
                 current_chunk.append(paragraph)
                 current_tokens += para_tokens
 
-        # Добавляем последний чанк
         if current_chunk and current_tokens >= min_chunk_size:
             chunk_text = context_prefix + "\n\n".join(current_chunk)
             chunks.append(
@@ -419,7 +323,6 @@ class ChunkingService:
             )
 
         if not chunks:
-            # Если ничего не получилось, возвращаем весь текст
             full_text = context_prefix + text
             chunks = [
                 {
@@ -430,9 +333,9 @@ class ChunkingService:
                 }
             ]
 
-        logger.info(f"Successfully created {len(chunks)} semantic chunks with context")
+        avg_tokens = sum(c["token_count"] for c in chunks) / len(chunks)
         logger.info(
-            f"Average chunk size: {sum(c['token_count'] for c in chunks) / len(chunks):.0f} tokens"
+            f"[Chunking] Created {len(chunks)} semantic chunks, avg {avg_tokens:.0f} tokens"
         )
 
         return chunks

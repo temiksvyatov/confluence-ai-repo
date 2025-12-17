@@ -17,16 +17,6 @@ class RAGService:
         temperature: float = 0.3,
         max_tokens: int = 8000,
     ):
-        """
-        Инициализация LLM клиента с поддержкой HyDE.
-
-        Args:
-            llm_base_url: Base URL для LLM API
-            llm_api_key: API ключ
-            llm_model: Название модели
-            temperature: Температура генерации
-            max_tokens: Максимум токенов в ответе
-        """
         logger.info(f"Initializing RAG service with model: {llm_model}")
         logger.info(
             f"Configuration: base_url={llm_base_url}, temperature={temperature}, max_tokens={max_tokens}"
@@ -37,21 +27,52 @@ class RAGService:
         self.max_tokens = max_tokens
         logger.info("RAG service initialized successfully")
 
+    def _log_llm_request(self, operation: str, messages: List[Dict], config: Dict):
+        logger.info("=" * 80)
+        logger.info(f"LLM REQUEST: {operation}")
+        logger.info("=" * 80)
+        logger.info(f"Model: {config.get('model')}")
+        logger.info(f"Temperature: {config.get('temperature')}")
+        logger.info(f"Max Tokens: {config.get('max_tokens')}")
+        logger.info("-" * 80)
+        logger.info("MESSAGES STRUCTURE:")
+        for i, msg in enumerate(messages):
+            logger.info(f"Message {i + 1}:")
+            logger.info(f"  Role: {msg.get('role')}")
+            content = msg.get("content", "")
+            if len(content) > 500:
+                logger.info(f"  Content (first 500 chars): {content[:500]}...")
+                logger.info(f"  Content (last 200 chars): ...{content[-200:]}")
+                logger.info(f"  Total content length: {len(content)} characters")
+            else:
+                logger.info(f"  Content: {content}")
+        logger.info("=" * 80)
+
+    def _log_llm_response(self, operation: str, response, elapsed: float):
+        logger.info("=" * 80)
+        logger.info(f"LLM RESPONSE: {operation}")
+        logger.info("=" * 80)
+        logger.info(f"Response time: {elapsed:.2f}s")
+
+        if hasattr(response, "usage"):
+            logger.info("Token usage:")
+            logger.info(f"  Prompt tokens: {response.usage.prompt_tokens}")
+            logger.info(f"  Completion tokens: {response.usage.completion_tokens}")
+            logger.info(f"  Total tokens: {response.usage.total_tokens}")
+
+        content = response.choices[0].message.content
+        logger.info(f"Response length: {len(content)} characters")
+
+        if len(content) > 500:
+            logger.info(f"Response (first 500 chars): {content[:500]}...")
+            logger.info(f"Response (last 200 chars): ...{content[-200:]}")
+        else:
+            logger.info(f"Response: {content}")
+
+        logger.info("=" * 80)
+
     def generate_hyde_document(self, query: str) -> str:
-        """
-        Генерировать гипотетический документ для запроса (HyDE).
-
-        HyDE (Hypothetical Document Embeddings) - техника, где мы генерируем
-        гипотетический ответ на запрос, затем ищем по эмбеддингу этого ответа.
-        Это часто дает лучшие результаты, чем поиск по исходному запросу.
-
-        Args:
-            query: Исходный запрос пользователя
-
-        Returns:
-            Гипотетический документ (ответ)
-        """
-        logger.info(f"Generating HyDE document for query: '{query[:50]}...'")
+        logger.info(f"[HyDE] Starting generation for query: '{query[:100]}...'")
 
         hyde_prompt = f"""Напиши краткий, информативный ответ на следующий вопрос, как если бы он был взят из документации.
 Не упоминай, что это гипотетический ответ. Пиши утвердительно и конкретно.
@@ -60,59 +81,52 @@ class RAGService:
 
 Ответ:"""
 
-        try:
-            start_time = time.time()
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Ты - эксперт по технической документации. Пиши кратко и по существу.",
-                    },
-                    {"role": "user", "content": hyde_prompt},
-                ],
-                temperature=0.3,
-                max_tokens=500,  # Короткий гипотетический документ
-            )
+        messages = [
+            {
+                "role": "system",
+                "content": "Ты - эксперт по технической документации. Пиши кратко и по существу.",
+            },
+            {"role": "user", "content": hyde_prompt},
+        ]
 
-            hyde_doc = response.choices[0].message.content
+        config = {
+            "model": self.model,
+            "temperature": 0.3,
+            "max_tokens": 500,
+        }
+
+        try:
+            self._log_llm_request("HyDE Generation", messages, config)
+
+            start_time = time.time()
+            response = self.client.chat.completions.create(messages=messages, **config)
             elapsed = time.time() - start_time
 
-            logger.info(f"HyDE document generated in {elapsed:.2f}s")
-            logger.debug(f"HyDE document: {hyde_doc[:100]}...")
+            self._log_llm_response("HyDE Generation", response, elapsed)
+
+            hyde_doc = response.choices[0].message.content
+            logger.info(f"[HyDE] Successfully generated document in {elapsed:.2f}s")
 
             return hyde_doc
 
         except Exception as e:
-            logger.error(f"Error generating HyDE document: {e}")
-            # Fallback: возвращаем исходный запрос
+            logger.error(f"[HyDE] Error: {e}", exc_info=True)
+            logger.info("[HyDE] Fallback to original query")
             return query
 
     def build_prompt_with_sources(
         self, question: str, context_chunks: List[Dict]
     ) -> str:
-        """
-        Построить промпт с пронумерованными источниками.
-
-        Args:
-            question: Вопрос пользователя
-            context_chunks: Найденные чанки с метаданными
-
-        Returns:
-            Промпт для LLM
-        """
         logger.info(
-            f"Building prompt with {len(context_chunks)} sources for question: '{question[:50]}...'"
+            f"[Prompt Builder] Building prompt with {len(context_chunks)} sources"
         )
 
-        # Формируем контекст с номерами источников
         context_parts = []
         for i, chunk in enumerate(context_chunks, 1):
             chunk_title = chunk.get("title", "Без названия")
             chunk_text = chunk.get("text", "")
             chunk_url = chunk.get("url", "")
 
-            # Форматируем источник с номером
             source_header = f"[{i}] {chunk_title}"
             if chunk_url:
                 source_header += f"\nURL: {chunk_url}"
@@ -141,24 +155,15 @@ class RAGService:
 
 ОТВЕТ:"""
 
-        logger.info(f"Prompt built, total length: {len(prompt)} characters")
+        logger.info(
+            f"[Prompt Builder] Prompt built, total length: {len(prompt)} characters"
+        )
         return prompt
 
     def generate_answer(self, question: str, context_chunks: List[Dict]) -> str:
-        """
-        Сгенерировать ответ на основе контекста.
-
-        Args:
-            question: Вопрос пользователя
-            context_chunks: Найденные чанки
-
-        Returns:
-            Ответ LLM
-        """
-        logger.info("=" * 80)
-        logger.info("GENERATE_ANSWER CALLED")
-        logger.info(f"Question: '{question}'")
-        logger.info(f"Context chunks: {len(context_chunks)}")
+        logger.info("[Answer Generation] Starting")
+        logger.info(f"[Answer Generation] Question: '{question}'")
+        logger.info(f"[Answer Generation] Context chunks: {len(context_chunks)}")
 
         system_prompt = """Ты - помощник по корпоративной документации Confluence.
 
@@ -176,59 +181,45 @@ class RAGService:
 
         user_prompt = self.build_prompt_with_sources(question, context_chunks)
 
-        try:
-            logger.info("Sending request to LLM...")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
+        config = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+        try:
+            self._log_llm_request("Answer Generation", messages, config)
 
             start_time = time.time()
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
+            response = self.client.chat.completions.create(messages=messages, **config)
             elapsed = time.time() - start_time
 
+            self._log_llm_response("Answer Generation", response, elapsed)
+
             answer = response.choices[0].message.content
+            logger.info("[Answer Generation] Completed successfully")
 
-            logger.info(f"✓ LLM response received in {elapsed:.2f}s")
-            logger.info(f"Response length: {len(answer)} characters")
-
-            if hasattr(response, "usage"):
-                logger.info(f"Token usage: {response.usage}")
-
-            logger.info("=" * 80)
             return answer
 
         except Exception as e:
-            logger.error(f"❌ Error generating answer: {e}", exc_info=True)
-            logger.info("=" * 80)
+            logger.error(f"[Answer Generation] Error: {e}", exc_info=True)
             return f"Ошибка генерации ответа: {str(e)}"
 
     def generate_answer_with_history(
         self, question: str, context_chunks: List[Dict], conversation_history: str
     ) -> str:
-        """
-        Сгенерировать ответ с учетом истории беседы.
+        logger.info("[Answer with History] Starting")
+        logger.info(f"[Answer with History] Question: '{question}'")
+        logger.info(f"[Answer with History] Context chunks: {len(context_chunks)}")
+        logger.info(
+            f"[Answer with History] History length: {len(conversation_history)} characters"
+        )
 
-        Args:
-            question: Вопрос пользователя
-            context_chunks: Найденные чанки
-            conversation_history: История переписки
-
-        Returns:
-            Сгенерированный ответ
-        """
-        logger.info("=" * 80)
-        logger.info("GENERATE_ANSWER_WITH_HISTORY CALLED")
-        logger.info(f"Question: '{question}'")
-        logger.info(f"Context chunks: {len(context_chunks)}")
-
-        # Формируем контекст с номерами
         context_parts = []
         for i, chunk in enumerate(context_chunks, 1):
             chunk_title = chunk.get("title", "Без названия")
@@ -271,52 +262,39 @@ class RAGService:
 
 ОТВЕТ:"""
 
-        try:
-            logger.info("Sending request to LLM with history...")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
+        config = {
+            "model": self.model,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+        try:
+            self._log_llm_request("Answer with History", messages, config)
 
             start_time = time.time()
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
+            response = self.client.chat.completions.create(messages=messages, **config)
             elapsed = time.time() - start_time
 
+            self._log_llm_response("Answer with History", response, elapsed)
+
             answer = response.choices[0].message.content
+            logger.info("[Answer with History] Completed successfully")
 
-            logger.info(f"✓ LLM response with history received in {elapsed:.2f}s")
-            logger.info(f"Response length: {len(answer)} characters")
-
-            if hasattr(response, "usage"):
-                logger.info(f"Token usage: {response.usage}")
-
-            logger.info("=" * 80)
             return answer
 
         except Exception as e:
-            logger.error(f"❌ Error generating answer with history: {e}", exc_info=True)
-            logger.info("=" * 80)
+            logger.error(f"[Answer with History] Error: {e}", exc_info=True)
             return "Извините, произошла ошибка при генерации ответа."
 
     def generate_sources_text(self, context_chunks: List[Dict]) -> str:
-        """
-        Сформировать текст со списком источников.
+        logger.info(f"[Sources] Generating list from {len(context_chunks)} chunks")
 
-        Args:
-            context_chunks: Найденные чанки
-
-        Returns:
-            Форматированный текст с источниками
-        """
-        logger.info(f"Generating sources list from {len(context_chunks)} chunks")
-
-        seen_pages = {}  # page_id -> (index, title, url)
+        seen_pages = {}
 
         for i, chunk in enumerate(context_chunks, 1):
             page_id = chunk.get("page_id", "")
@@ -329,7 +307,6 @@ class RAGService:
         if not seen_pages:
             return ""
 
-        # Формируем список источников
         sources_list = []
         for page_id, (idx, title, url) in seen_pages.items():
             if url and re.match(r"^https?://", url):
@@ -339,26 +316,5 @@ class RAGService:
 
         result = "\n\n---\n\n**Источники:**\n" + "\n".join(sources_list)
 
-        logger.info(f"Generated sources list with {len(sources_list)} unique pages")
+        logger.info(f"[Sources] Generated list with {len(sources_list)} unique pages")
         return result
-
-    def extract_query_intent(self, query: str) -> Dict[str, any]:
-        """
-        Извлечь намерение из запроса для улучшения поиска.
-
-        Args:
-            query: Запрос пользователя
-
-        Returns:
-            Словарь с информацией о намерении
-        """
-        intent = {
-            "is_question": "?" in query,
-            "is_how_to": any(word in query.lower() for word in ["как", "how"]),
-            "is_what": any(word in query.lower() for word in ["что", "what", "какой"]),
-            "is_why": any(word in query.lower() for word in ["почему", "why", "зачем"]),
-            "is_comparison": any(
-                word in query.lower() for word in ["сравн", "разниц", "vs", "или"]
-            ),
-        }
-        return intent

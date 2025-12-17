@@ -59,7 +59,7 @@ class IndexingService:
             try:
                 callback()
             except Exception as e:
-                logger.error(f"Error in progress callback: {e}")
+                logger.error(f"[Indexing] Error in progress callback: {e}")
 
     def get_progress(self) -> Dict:
         elapsed = None
@@ -88,7 +88,7 @@ class IndexingService:
 
     def stop(self):
         if self.status == IndexingStatus.RUNNING:
-            logger.info("Stopping indexing process...")
+            logger.info("[Indexing] Stopping process...")
             self.should_stop = True
             self.status = IndexingStatus.STOPPING
 
@@ -110,7 +110,7 @@ class IndexingService:
         self.end_time = None
 
         try:
-            logger.info(f"Starting space indexing: {space_key}")
+            logger.info(f"[Indexing] Starting space indexing: {space_key}")
 
             pages = await asyncio.to_thread(
                 self.confluence_service.get_all_pages_from_space, space_key
@@ -124,12 +124,12 @@ class IndexingService:
                 return {"success": False, "message": self.error_message}
 
             self.total_pages = len(pages)
-            logger.info(f"Found {self.total_pages} pages in space {space_key}")
+            logger.info(f"[Indexing] Found {self.total_pages} pages in {space_key}")
             self._notify_progress()
 
             for page in pages:
                 if self.should_stop:
-                    logger.info("Indexing stopped by user")
+                    logger.info("[Indexing] Stopped by user")
                     self.status = IndexingStatus.STOPPED
                     self.end_time = datetime.now()
                     self._notify_progress()
@@ -153,7 +153,7 @@ class IndexingService:
 
                     if indexed_version is not None and indexed_version >= page_version:
                         logger.info(
-                            f"Skipping page {page_id} (already indexed, version {indexed_version})"
+                            f"[Indexing] Skipping {page_id} (already indexed, v{indexed_version})"
                         )
                         self.skipped_pages += 1
                         self.processed_pages += 1
@@ -162,7 +162,7 @@ class IndexingService:
 
                     if indexed_version is not None:
                         logger.info(
-                            f"Updating page {page_id} (version {indexed_version} -> {page_version})"
+                            f"[Indexing] Updating {page_id} (v{indexed_version} -> v{page_version})"
                         )
                         await asyncio.to_thread(
                             self.qdrant_service.delete_by_page_id, page_id
@@ -173,7 +173,7 @@ class IndexingService:
                     )
 
                     if not full_page:
-                        logger.warning(f"Could not fetch full page {page_id}")
+                        logger.warning(f"[Indexing] Could not fetch {page_id}")
                         self.failed_pages += 1
                         self.processed_pages += 1
                         self._notify_progress()
@@ -183,7 +183,6 @@ class IndexingService:
                         self.confluence_service.extract_page_data, full_page
                     )
 
-                    # Используем новый chunking сервис
                     if self.chunking_strategy == "semantic":
                         chunks_data = await asyncio.to_thread(
                             self.chunking_service.chunk_text_semantic,
@@ -204,16 +203,14 @@ class IndexingService:
                         )
 
                     if not chunks_data:
-                        logger.warning(f"No chunks created for page {page_id}")
+                        logger.warning(f"[Indexing] No chunks for {page_id}")
                         self.failed_pages += 1
                         self.processed_pages += 1
                         self._notify_progress()
                         continue
 
-                    # Извлекаем тексты чанков
                     chunk_texts = [chunk["text"] for chunk in chunks_data]
 
-                    # Генерируем эмбеддинги для пассажей (не запросов!)
                     embeddings = await asyncio.to_thread(
                         self.embedding_service.embed_batch_passages, chunk_texts
                     )
@@ -232,11 +229,11 @@ class IndexingService:
 
                     self.indexed_pages += 1
                     logger.info(
-                        f"Successfully indexed page {page_id}: {page_title} ({len(chunks_data)} chunks)"
+                        f"[Indexing] Success: {page_id} ({len(chunks_data)} chunks)"
                     )
 
                 except Exception as e:
-                    logger.error(f"Error indexing page {page_id}: {e}", exc_info=True)
+                    logger.error(f"[Indexing] Error on {page_id}: {e}", exc_info=True)
                     self.failed_pages += 1
 
                 finally:
@@ -247,7 +244,7 @@ class IndexingService:
             self.end_time = datetime.now()
             self._notify_progress()
 
-            logger.info(f"Space indexing completed: {space_key}")
+            logger.info(f"[Indexing] Space indexing completed: {space_key}")
             return {
                 "success": True,
                 "message": "Индексация завершена",
@@ -255,7 +252,7 @@ class IndexingService:
             }
 
         except Exception as e:
-            logger.error(f"Error during space indexing: {e}", exc_info=True)
+            logger.error(f"[Indexing] Error during space indexing: {e}", exc_info=True)
             self.status = IndexingStatus.ERROR
             self.error_message = str(e)
             self.end_time = datetime.now()

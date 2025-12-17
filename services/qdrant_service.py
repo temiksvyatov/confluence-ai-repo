@@ -28,53 +28,43 @@ class QdrantService:
         for attempt in range(max_retries):
             try:
                 logger.info(
-                    f"Attempting to connect to Qdrant at {self.url} ({attempt + 1}/{max_retries})..."
+                    f"[Qdrant] Connecting to {self.url} (attempt {attempt + 1}/{max_retries})"
                 )
                 self.client = QdrantClient(url=self.url)
                 self.client.get_collections()
-                logger.info("Successfully connected to Qdrant.")
+                logger.info("[Qdrant] Connected successfully")
                 return
             except Exception as e:
-                logger.error(f"Error connecting to Qdrant: {e}", exc_info=True)
+                logger.error(f"[Qdrant] Connection error: {e}", exc_info=True)
                 if attempt < max_retries - 1:
-                    logger.warning(f"Retrying in {delay} seconds...")
+                    logger.warning(f"[Qdrant] Retrying in {delay}s...")
                     time.sleep(delay)
                 else:
-                    logger.critical(
-                        f"Failed to connect to Qdrant after {max_retries} attempts."
-                    )
-                    raise Exception(
-                        f"Не удалось подключиться к Qdrant после {max_retries} попыток"
-                    )
+                    logger.critical(f"[Qdrant] Failed after {max_retries} attempts")
+                    raise Exception("Не удалось подключиться к Qdrant")
 
     def init_collection(self):
-        logger.info(f"Initializing collection '{self.collection_name}'...")
+        logger.info(f"[Qdrant] Initializing collection '{self.collection_name}'")
         try:
             if self.client is None:
                 raise ValueError("Client is not initialized")
+
             collections = self.client.get_collections().collections
             exists = any(col.name == self.collection_name for col in collections)
 
             if not exists:
-                logger.info(
-                    f"Collection '{self.collection_name}' does not exist. Creating..."
-                )
+                logger.info(f"[Qdrant] Creating collection '{self.collection_name}'")
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
                         size=self.vector_size, distance=Distance.COSINE
                     ),
                 )
-                logger.info(
-                    f"Collection '{self.collection_name}' created successfully."
-                )
+                logger.info("[Qdrant] Collection created")
             else:
-                logger.info(f"Collection '{self.collection_name}' already exists.")
+                logger.info("[Qdrant] Collection already exists")
         except Exception as e:
-            logger.error(
-                f"Error initializing collection '{self.collection_name}': {e}",
-                exc_info=True,
-            )
+            logger.error(f"[Qdrant] Error initializing collection: {e}", exc_info=True)
             raise
 
     def get_page_version(self, page_id: str) -> Optional[int]:
@@ -98,7 +88,7 @@ class QdrantService:
                 return scroll_result[0][0].payload.get("version")
             return None
         except Exception as e:
-            logger.error(f"Error getting page version for {page_id}: {e}")
+            logger.error(f"[Qdrant] Error getting version for {page_id}: {e}")
             return None
 
     def get_all_indexed_pages(self) -> List[Dict[str, any]]:
@@ -135,10 +125,11 @@ class QdrantService:
 
                 offset = next_offset
 
+            logger.info(f"[Qdrant] Retrieved {len(pages)} indexed pages")
             return list(pages.values())
 
         except Exception as e:
-            logger.error(f"Error getting indexed pages: {e}", exc_info=True)
+            logger.error(f"[Qdrant] Error getting indexed pages: {e}", exc_info=True)
             return []
 
     def search_indexed_pages(self, query: str) -> List[Dict[str, any]]:
@@ -182,17 +173,18 @@ class QdrantService:
 
                 offset = next_offset
 
+            logger.info(f"[Qdrant] Search found {len(pages)} pages matching '{query}'")
             return list(pages.values())
 
         except Exception as e:
-            logger.error(f"Error searching indexed pages: {e}", exc_info=True)
+            logger.error(f"[Qdrant] Error searching pages: {e}", exc_info=True)
             return []
 
     def upsert_chunks(
         self, chunks: List[str], embeddings: List[List[float]], metadata: Dict[str, any]
     ) -> int:
         logger.info(
-            f"Preparing to upsert {len(chunks)} chunks for page_id='{metadata.get('page_id')}'."
+            f"[Qdrant] Upserting {len(chunks)} chunks for page {metadata.get('page_id')}"
         )
         points = []
 
@@ -214,16 +206,12 @@ class QdrantService:
         try:
             if self.client is None:
                 raise ValueError("Client is not initialized")
+
             self.client.upsert(collection_name=self.collection_name, points=points)
-            logger.info(
-                f"Successfully upserted {len(points)} points into collection '{self.collection_name}'."
-            )
+            logger.info(f"[Qdrant] Successfully upserted {len(points)} points")
             return len(points)
         except Exception as e:
-            logger.error(
-                f"Failed to upsert chunks for page_id='{metadata.get('page_id')}': {e}",
-                exc_info=True,
-            )
+            logger.error(f"[Qdrant] Failed to upsert: {e}", exc_info=True)
             raise
 
     def search(
@@ -232,12 +220,11 @@ class QdrantService:
         top_k: int = 5,
         page_id_filter: Optional[str] = None,
     ) -> List[Dict]:
-        logger.info(
-            f"Searching in collection '{self.collection_name}' for top_k={top_k} results."
-        )
+        logger.info(f"[Qdrant] Searching for top_k={top_k} results")
+
         search_filter = None
         if page_id_filter:
-            logger.info(f"Applying filter for page_id: {page_id_filter}")
+            logger.info(f"[Qdrant] Filtering by page_id: {page_id_filter}")
             search_filter = Filter(
                 must=[
                     FieldCondition(
@@ -257,7 +244,7 @@ class QdrantService:
                 query_filter=search_filter,
             ).points
 
-            logger.info(f"Found {len(results)} matching chunks.")
+            logger.info(f"[Qdrant] Found {len(results)} matching chunks")
             return [
                 {
                     "text": hit.payload.get("text", ""),
@@ -269,17 +256,15 @@ class QdrantService:
                 for hit in results
             ]
         except Exception as e:
-            logger.error(
-                f"Search failed in collection '{self.collection_name}': {e}",
-                exc_info=True,
-            )
+            logger.error(f"[Qdrant] Search failed: {e}", exc_info=True)
             return []
 
     def delete_by_page_id(self, page_id: str) -> bool:
-        logger.info(f"Attempting to delete all chunks for page_id: {page_id}")
+        logger.info(f"[Qdrant] Deleting chunks for page_id: {page_id}")
         try:
             if self.client is None:
                 raise ValueError("Client is not initialized")
+
             self.client.delete(
                 collection_name=self.collection_name,
                 points_selector=Filter(
@@ -288,34 +273,31 @@ class QdrantService:
                     ]
                 ),
             )
-            logger.info(f"Successfully deleted chunks for page_id: {page_id}")
+            logger.info(f"[Qdrant] Deleted chunks for {page_id}")
             return True
         except Exception as e:
-            logger.error(
-                f"Error deleting chunks for page_id '{page_id}': {e}", exc_info=True
-            )
+            logger.error(f"[Qdrant] Error deleting {page_id}: {e}", exc_info=True)
             return False
 
     def clear_collection(self) -> bool:
-        logger.info(f"Attempting to clear collection '{self.collection_name}'")
+        logger.info(f"[Qdrant] Clearing collection '{self.collection_name}'")
         try:
             if self.client is None:
                 raise ValueError("Client is not initialized")
+
             self.client.delete_collection(collection_name=self.collection_name)
             self.init_collection()
-            logger.info(f"Successfully cleared collection '{self.collection_name}'")
+            logger.info("[Qdrant] Collection cleared")
             return True
         except Exception as e:
-            logger.error(
-                f"Error clearing collection '{self.collection_name}': {e}",
-                exc_info=True,
-            )
+            logger.error(f"[Qdrant] Error clearing collection: {e}", exc_info=True)
             return False
 
     def get_collection_stats(self) -> Dict[str, any]:
         try:
             if self.client is None:
                 raise ValueError("Client is not initialized")
+
             collection_info = self.client.get_collection(
                 collection_name=self.collection_name
             )
@@ -326,5 +308,5 @@ class QdrantService:
                 else 0,
             }
         except Exception as e:
-            logger.error(f"Error getting collection stats: {e}")
+            logger.error(f"[Qdrant] Error getting stats: {e}")
             return {"points_count": 0, "indexed_vectors_count": 0}
