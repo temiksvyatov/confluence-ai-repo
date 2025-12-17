@@ -1,7 +1,8 @@
 import asyncio
 import logging
-from typing import Dict, List
+import uuid
 
+from database import ChatDatabase
 from fastapi import FastAPI
 from nicegui import app, ui
 
@@ -31,6 +32,9 @@ logger.info("CONFLUENCE RAG v2 - ENHANCED INITIALIZATION")
 logger.info("=" * 80)
 
 logger.info("Initializing services...")
+
+chat_db = ChatDatabase()
+logger.info("✅ Chat database initialized")
 
 confluence_service = ConfluenceService(
     url=settings.confluence_url,
@@ -101,16 +105,22 @@ logger.info("ALL SERVICES INITIALIZED")
 logger.info("=" * 80)
 
 
-def get_chat_history() -> List[Dict]:
-    if "chat_history" not in app.storage.user:
-        app.storage.user["chat_history"] = []
-    return app.storage.user["chat_history"]
+def get_user_id() -> str:
+    if "user_id" not in app.storage.user:
+        app.storage.user["user_id"] = str(uuid.uuid4())
+    return app.storage.user["user_id"]
 
 
-def add_message(role: str, content: str):
-    history = get_chat_history()
-    history.append({"role": role, "content": content})
-    app.storage.user["chat_history"] = history
+def get_current_chat_id() -> int:
+    if "current_chat_id" not in app.storage.user:
+        user_id = get_user_id()
+        chat_id = chat_db.create_chat(user_id, "Новый чат")
+        app.storage.user["current_chat_id"] = chat_id
+    return app.storage.user["current_chat_id"]
+
+
+def set_current_chat_id(chat_id: int):
+    app.storage.user["current_chat_id"] = chat_id
 
 
 def create_navigation_drawer():
@@ -124,23 +134,38 @@ def create_navigation_drawer():
             ui.separator().classes("bg-blue-200")
 
             with ui.column().classes("w-full gap-2"):
-                with ui.row(on_click=lambda: ui.navigate.to("/")).classes(
-                    "w-full p-3 rounded-lg hover:bg-blue-200 cursor-pointer transition-all items-center gap-3"
+                with (
+                    ui.element("div")
+                    .classes(
+                        "w-full p-3 rounded-lg hover:bg-blue-200 cursor-pointer transition-all"
+                    )
+                    .on("click", lambda: ui.navigate.to("/"))
                 ):
-                    ui.icon("forum", size="24px").classes("text-blue-600")
-                    ui.label("Чат").classes("font-medium text-gray-700")
+                    with ui.row().classes("items-center gap-3"):
+                        ui.icon("forum", size="24px").classes("text-blue-600")
+                        ui.label("Чат").classes("font-medium text-gray-700")
 
-                with ui.row(on_click=lambda: ui.navigate.to("/indexing")).classes(
-                    "w-full p-3 rounded-lg hover:bg-blue-200 cursor-pointer transition-all items-center gap-3"
+                with (
+                    ui.element("div")
+                    .classes(
+                        "w-full p-3 rounded-lg hover:bg-blue-200 cursor-pointer transition-all"
+                    )
+                    .on("click", lambda: ui.navigate.to("/indexing"))
                 ):
-                    ui.icon("cloud_upload", size="24px").classes("text-blue-600")
-                    ui.label("Индексация").classes("font-medium text-gray-700")
+                    with ui.row().classes("items-center gap-3"):
+                        ui.icon("cloud_upload", size="24px").classes("text-blue-600")
+                        ui.label("Индексация").classes("font-medium text-gray-700")
 
-                with ui.row(on_click=lambda: ui.navigate.to("/database")).classes(
-                    "w-full p-3 rounded-lg hover:bg-blue-200 cursor-pointer transition-all items-center gap-3"
+                with (
+                    ui.element("div")
+                    .classes(
+                        "w-full p-3 rounded-lg hover:bg-blue-200 cursor-pointer transition-all"
+                    )
+                    .on("click", lambda: ui.navigate.to("/database"))
                 ):
-                    ui.icon("storage", size="24px").classes("text-blue-600")
-                    ui.label("База страниц").classes("font-medium text-gray-700")
+                    with ui.row().classes("items-center gap-3"):
+                        ui.icon("storage", size="24px").classes("text-blue-600")
+                        ui.label("База страниц").classes("font-medium text-gray-700")
 
     return left_drawer
 
@@ -153,6 +178,8 @@ def chat_page():
     )
 
     left_drawer = create_navigation_drawer()
+    user_id = get_user_id()
+    current_chat_id = get_current_chat_id()
 
     with ui.header().classes("bg-white shadow-lg"):
         with ui.row().classes("w-full items-center justify-between p-4"):
@@ -172,9 +199,11 @@ def chat_page():
                     "flat color=blue-7"
                 )
 
+    chats_sidebar = ui.left_drawer(value=False).classes("bg-white shadow-xl")
+
     def update_chat():
         chat_container.clear()
-        messages = get_chat_history()
+        messages = chat_db.get_chat_messages(current_chat_id, user_id)
 
         with chat_container:
             if not messages:
@@ -195,7 +224,8 @@ def chat_page():
 - 📊 Чанкинг по токенам
 - 🔗 Улучшенные промпты
 - 🚀 BGE-M3 embedding model
-- 👤 Изолированные сессии пользователей
+- 💾 Сохранение истории чатов
+- 📑 Множественные чаты
 
 **Примеры вопросов:**
 - Как настроить VPN?
@@ -224,6 +254,86 @@ def chat_page():
                                     "text-gray-700 mt-2 leading-relaxed"
                                 )
 
+    def refresh_chats_sidebar():
+        chats_sidebar.clear()
+        chats = chat_db.get_user_chats(user_id)
+
+        with chats_sidebar:
+            with ui.column().classes("w-full p-4 gap-3"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label("Чаты").classes("text-xl font-bold text-gray-800")
+                    ui.button(
+                        icon="close", on_click=lambda: chats_sidebar.toggle()
+                    ).props("flat round")
+
+                ui.button("Новый чат", on_click=lambda: create_new_chat()).props(
+                    "color=blue-7 icon=add"
+                ).classes("w-full")
+
+                ui.separator()
+
+                for chat in chats:
+                    is_current = chat["id"] == current_chat_id
+                    with (
+                        ui.card()
+                        .classes(
+                            f"w-full p-3 cursor-pointer hover:shadow-lg transition-all {'bg-blue-100' if is_current else 'bg-white'}"
+                        )
+                        .on("click", lambda c=chat: switch_chat(c["id"]))
+                    ):
+                        with ui.column().classes("w-full gap-1"):
+                            with ui.row().classes(
+                                "w-full items-center justify-between"
+                            ):
+                                title = chat["title"][:30] + (
+                                    "..." if len(chat["title"]) > 30 else ""
+                                )
+                                ui.label(title).classes(
+                                    "font-bold text-sm text-gray-800"
+                                )
+                                ui.button(
+                                    icon="delete",
+                                    on_click=lambda e, c=chat: delete_chat(e, c["id"]),
+                                ).props("flat round size=sm color=red")
+
+                            ui.label(f"Сообщений: {chat['message_count']}").classes(
+                                "text-xs text-gray-600"
+                            )
+
+    def create_new_chat():
+        nonlocal current_chat_id
+        chat_id = chat_db.create_chat(user_id, "Новый чат")
+        set_current_chat_id(chat_id)
+        current_chat_id = chat_id
+        chats_sidebar.toggle()
+        refresh_chats_sidebar()
+        update_chat()
+
+    def switch_chat(chat_id: int):
+        nonlocal current_chat_id
+        set_current_chat_id(chat_id)
+        current_chat_id = chat_id
+        chats_sidebar.toggle()
+        update_chat()
+
+    def delete_chat(event, chat_id: int):
+        nonlocal current_chat_id
+        event.stopPropagation()
+        chat_db.delete_chat(chat_id, user_id)
+
+        if chat_id == current_chat_id:
+            chats = chat_db.get_user_chats(user_id)
+            if chats:
+                current_chat_id = chats[0]["id"]
+                set_current_chat_id(current_chat_id)
+            else:
+                new_chat_id = chat_db.create_chat(user_id, "Новый чат")
+                current_chat_id = new_chat_id
+                set_current_chat_id(new_chat_id)
+
+        refresh_chats_sidebar()
+        update_chat()
+
     async def send_message():
         question = question_input.value.strip()
 
@@ -236,7 +346,13 @@ def chat_page():
         logger.info("=" * 80)
 
         question_input.value = ""
-        add_message("user", question)
+        chat_db.add_message(current_chat_id, user_id, "user", question)
+
+        messages = chat_db.get_chat_messages(current_chat_id, user_id)
+        if len(messages) == 1:
+            title = question[:50]
+            chat_db.update_chat_title(current_chat_id, user_id, title)
+
         update_chat()
 
         spinner_container = None
@@ -305,9 +421,9 @@ def chat_page():
                         )
                     logger.info(f"[Pipeline] Reranked to {len(search_results)} results")
 
-                history = get_chat_history()
+                messages = chat_db.get_chat_messages(current_chat_id, user_id)
                 conversation_history = "\n".join(
-                    [f"{msg['role']}: {msg['content']}" for msg in history[:-1]]
+                    [f"{msg['role']}: {msg['content']}" for msg in messages[:-1]]
                 )
 
                 logger.info("[Pipeline] Generating answer...")
@@ -325,7 +441,7 @@ def chat_page():
             if spinner_container:
                 spinner_container.delete()
 
-            add_message("assistant", answer)
+            chat_db.add_message(current_chat_id, user_id, "assistant", answer)
             update_chat()
 
             logger.info("=" * 80)
@@ -337,11 +453,17 @@ def chat_page():
             logger.error(error_msg, exc_info=True)
             if spinner_container:
                 spinner_container.delete()
-            add_message("assistant", error_msg)
+            chat_db.add_message(current_chat_id, user_id, "assistant", error_msg)
             update_chat()
             ui.notify(error_msg, type="negative")
 
     with ui.column().classes("flex-1 p-6 overflow-hidden"):
+        with ui.row().classes("w-full mb-4"):
+            ui.button(
+                icon="menu_open",
+                on_click=lambda: (chats_sidebar.toggle(), refresh_chats_sidebar()),
+            ).props("fab color=blue-7")
+
         chat_container = ui.column().classes("w-full h-full overflow-y-auto")
         update_chat()
 

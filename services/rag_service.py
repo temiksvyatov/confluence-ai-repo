@@ -7,6 +7,13 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
+file_logger = logging.getLogger("full_llm_logger")
+file_logger.setLevel(logging.INFO)
+file_handler = logging.FileHandler("/data/llm_full.log", mode="a", encoding="utf-8")
+file_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+file_logger.addHandler(file_handler)
+file_logger.propagate = False
+
 
 class RAGService:
     def __init__(
@@ -17,15 +24,15 @@ class RAGService:
         temperature: float = 0.3,
         max_tokens: int = 8000,
     ):
-        logger.info(f"Initializing RAG service with model: {llm_model}")
+        logger.info(f"[RAG] Initializing with model: {llm_model}")
         logger.info(
-            f"Configuration: base_url={llm_base_url}, temperature={temperature}, max_tokens={max_tokens}"
+            f"[RAG] Config: base_url={llm_base_url}, temp={temperature}, max_tokens={max_tokens}"
         )
         self.client = OpenAI(base_url=llm_base_url, api_key=llm_api_key)
         self.model = llm_model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        logger.info("RAG service initialized successfully")
+        logger.info("[RAG] Service initialized")
 
     def _log_llm_request(self, operation: str, messages: List[Dict], config: Dict):
         logger.info("=" * 80)
@@ -47,6 +54,18 @@ class RAGService:
             else:
                 logger.info(f"  Content: {content}")
         logger.info("=" * 80)
+
+        file_logger.info("=" * 100)
+        file_logger.info(f"LLM REQUEST: {operation}")
+        file_logger.info("=" * 100)
+        file_logger.info(
+            f"Model: {config.get('model')}, Temperature: {config.get('temperature')}, Max Tokens: {config.get('max_tokens')}"
+        )
+        file_logger.info("-" * 100)
+        for i, msg in enumerate(messages):
+            file_logger.info(f"Message {i + 1} [Role: {msg.get('role')}]:")
+            file_logger.info(msg.get("content", ""))
+            file_logger.info("-" * 100)
 
     def _log_llm_response(self, operation: str, response, elapsed: float):
         logger.info("=" * 80)
@@ -71,8 +90,21 @@ class RAGService:
 
         logger.info("=" * 80)
 
+        file_logger.info("=" * 100)
+        file_logger.info(f"LLM RESPONSE: {operation}")
+        file_logger.info("=" * 100)
+        file_logger.info(f"Response time: {elapsed:.2f}s")
+        if hasattr(response, "usage"):
+            file_logger.info(
+                f"Token usage: prompt={response.usage.prompt_tokens}, completion={response.usage.completion_tokens}, total={response.usage.total_tokens}"
+            )
+        file_logger.info("-" * 100)
+        file_logger.info("FULL RESPONSE:")
+        file_logger.info(content)
+        file_logger.info("=" * 100)
+
     def generate_hyde_document(self, query: str) -> str:
-        logger.info(f"[HyDE] Starting generation for query: '{query[:100]}...'")
+        logger.info(f"[HyDE] Starting for query: '{query[:100]}...'")
 
         hyde_prompt = f"""Напиши краткий, информативный ответ на следующий вопрос, как если бы он был взят из документации.
 Не упоминай, что это гипотетический ответ. Пиши утвердительно и конкретно.
@@ -105,21 +137,19 @@ class RAGService:
             self._log_llm_response("HyDE Generation", response, elapsed)
 
             hyde_doc = response.choices[0].message.content
-            logger.info(f"[HyDE] Successfully generated document in {elapsed:.2f}s")
+            logger.info(f"[HyDE] Generated in {elapsed:.2f}s")
 
             return hyde_doc
 
         except Exception as e:
             logger.error(f"[HyDE] Error: {e}", exc_info=True)
-            logger.info("[HyDE] Fallback to original query")
+            file_logger.error(f"[HyDE] Error: {e}")
             return query
 
     def build_prompt_with_sources(
         self, question: str, context_chunks: List[Dict]
     ) -> str:
-        logger.info(
-            f"[Prompt Builder] Building prompt with {len(context_chunks)} sources"
-        )
+        logger.info(f"[Prompt] Building with {len(context_chunks)} sources")
 
         context_parts = []
         for i, chunk in enumerate(context_chunks, 1):
@@ -139,11 +169,10 @@ class RAGService:
 
 ВАЖНЫЕ ПРАВИЛА:
 1. Используй ТОЛЬКО информацию из предоставленных документов
-2. При упоминании информации ОБЯЗАТЕЛЬНО указывай номер источника в квадратных скобках, например: [1], [2]
-3. Если информация есть в нескольких источниках, укажи все: [1, 3]
-4. Если в документах нет ответа на вопрос, честно скажи об этом
-5. Не придумывай информацию
-6. Будь конкретным и структурированным
+2. НЕ используй номера источников в своем ответе (например [1], [2])
+3. Если в документах нет ответа на вопрос, честно скажи об этом
+4. Не придумывай информацию
+5. Будь конкретным и структурированным
 
 ДОКУМЕНТЫ:
 
@@ -155,28 +184,21 @@ class RAGService:
 
 ОТВЕТ:"""
 
-        logger.info(
-            f"[Prompt Builder] Prompt built, total length: {len(prompt)} characters"
-        )
+        logger.info(f"[Prompt] Built, length: {len(prompt)} chars")
         return prompt
 
     def generate_answer(self, question: str, context_chunks: List[Dict]) -> str:
-        logger.info("[Answer Generation] Starting")
-        logger.info(f"[Answer Generation] Question: '{question}'")
-        logger.info(f"[Answer Generation] Context chunks: {len(context_chunks)}")
+        logger.info("[Answer] Starting generation")
+        logger.info(f"[Answer] Question: '{question}'")
+        logger.info(f"[Answer] Context chunks: {len(context_chunks)}")
 
         system_prompt = """Ты - помощник по корпоративной документации Confluence.
 
 Твоя задача:
 - Отвечать точно на основе предоставленных документов
-- ВСЕГДА указывать номера источников [1], [2] и т.д. при упоминании информации
+- НЕ указывай номера источников в тексте ответа
 - Структурировать ответ для удобства чтения
 - Признавать, если информации недостаточно для ответа
-
-Формат ссылок на источники:
-- Одиночная ссылка: "Согласно документации [1], ..."
-- Множественные ссылки: "Эта информация подтверждается в нескольких источниках [1, 3]"
-- В конце предложения: "... настройка выполняется через панель администратора [2]."
 """
 
         user_prompt = self.build_prompt_with_sources(question, context_chunks)
@@ -202,22 +224,24 @@ class RAGService:
             self._log_llm_response("Answer Generation", response, elapsed)
 
             answer = response.choices[0].message.content
-            logger.info("[Answer Generation] Completed successfully")
+            answer = re.sub(r"\[\d+\]", "", answer)
+            logger.info("[Answer] Generation completed")
 
             return answer
 
         except Exception as e:
-            logger.error(f"[Answer Generation] Error: {e}", exc_info=True)
+            logger.error(f"[Answer] Error: {e}", exc_info=True)
+            file_logger.error(f"[Answer] Error: {e}")
             return f"Ошибка генерации ответа: {str(e)}"
 
     def generate_answer_with_history(
         self, question: str, context_chunks: List[Dict], conversation_history: str
     ) -> str:
-        logger.info("[Answer with History] Starting")
-        logger.info(f"[Answer with History] Question: '{question}'")
-        logger.info(f"[Answer with History] Context chunks: {len(context_chunks)}")
+        logger.info("[Answer+History] Starting")
+        logger.info(f"[Answer+History] Question: '{question}'")
+        logger.info(f"[Answer+History] Context chunks: {len(context_chunks)}")
         logger.info(
-            f"[Answer with History] History length: {len(conversation_history)} characters"
+            f"[Answer+History] History length: {len(conversation_history)} chars"
         )
 
         context_parts = []
@@ -242,14 +266,9 @@ class RAGService:
 ПРАВИЛА ОТВЕТА:
 1. Учитывай контекст предыдущей беседы для понимания вопроса
 2. Отвечай на основе ТОЛЬКО предоставленных документов
-3. ОБЯЗАТЕЛЬНО указывай номера источников [1], [2] при использовании информации
+3. НЕ указывай номера источников в тексте ответа
 4. Если информации недостаточно, честно скажи об этом
 5. Будь конкретным и структурированным
-
-Формат ссылок:
-- "Как упоминалось [1], ..."
-- "Согласно нескольким источникам [1, 3], ..."
-- "... процесс описан в документации [2]."
 """
 
         user_prompt = f"""ДОКУМЕНТЫ:
@@ -283,16 +302,18 @@ class RAGService:
             self._log_llm_response("Answer with History", response, elapsed)
 
             answer = response.choices[0].message.content
-            logger.info("[Answer with History] Completed successfully")
+            answer = re.sub(r"\[\d+\]", "", answer)
+            logger.info("[Answer+History] Completed")
 
             return answer
 
         except Exception as e:
-            logger.error(f"[Answer with History] Error: {e}", exc_info=True)
+            logger.error(f"[Answer+History] Error: {e}", exc_info=True)
+            file_logger.error(f"[Answer+History] Error: {e}")
             return "Извините, произошла ошибка при генерации ответа."
 
     def generate_sources_text(self, context_chunks: List[Dict]) -> str:
-        logger.info(f"[Sources] Generating list from {len(context_chunks)} chunks")
+        logger.info(f"[Sources] Generating from {len(context_chunks)} chunks")
 
         seen_pages = {}
 
@@ -316,5 +337,5 @@ class RAGService:
 
         result = "\n\n---\n\n**Источники:**\n" + "\n".join(sources_list)
 
-        logger.info(f"[Sources] Generated list with {len(sources_list)} unique pages")
+        logger.info(f"[Sources] Generated {len(sources_list)} unique pages")
         return result
