@@ -71,8 +71,8 @@ class RAGService:
                     },
                     {"role": "user", "content": hyde_prompt},
                 ],
-                temperature=0.5,  # Немного выше для креативности
-                max_tokens=300,  # Короткий гипотетический документ
+                temperature=0.3,
+                max_tokens=500,  # Короткий гипотетический документ
             )
 
             hyde_doc = response.choices[0].message.content

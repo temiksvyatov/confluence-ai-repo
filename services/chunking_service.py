@@ -1,28 +1,194 @@
 import logging
+import os
 from typing import Dict, List
-
-import tiktoken
 
 logger = logging.getLogger(__name__)
 
 
 class ChunkingService:
-    def __init__(self, model_name: str = "cl100k_base"):
+    def __init__(
+        self, model_name: str = "cl100k_base", local_tiktoken_path: str = None
+    ):
         """
         Инициализация сервиса чанкинга с токенизацией.
 
         Args:
             model_name: Название модели токенизации (cl100k_base для GPT-4/3.5)
+            local_tiktoken_path: Путь к локальному .tiktoken файлу (для закрытых контуров)
         """
         logger.info(f"Initializing chunking service with tokenizer: {model_name}")
+        self.tokenizer = None
+        self.use_simple_tokenizer = False
+
+        # Пытаемся загрузить tiktoken
         try:
-            self.tokenizer = tiktoken.get_encoding(model_name)
-        except Exception as e:
+            import tiktoken
+
+            # Если указан локальный путь, загружаем из него
+            if local_tiktoken_path:
+                if os.path.exists(local_tiktoken_path):
+                    logger.info(
+                        f"Loading tokenizer from local file: {local_tiktoken_path}"
+                    )
+                    self.tokenizer = self._load_local_tokenizer(
+                        local_tiktoken_path, model_name, tiktoken
+                    )
+                    logger.info("✅ Tokenizer loaded from local file successfully")
+                else:
+                    logger.error(
+                        f"❌ Local tokenizer file not found: {local_tiktoken_path}"
+                    )
+                    raise FileNotFoundError(
+                        f"Tokenizer file not found: {local_tiktoken_path}"
+                    )
+            else:
+                # Пытаемся загрузить из стандартных мест
+                default_paths = [
+                    f"/app/tokenizers/{model_name}.tiktoken",
+                    f"/app/.cache/tiktoken/{model_name}.tiktoken",
+                    f"./tokenizers/{model_name}.tiktoken",
+                    f"./{model_name}.tiktoken",
+                ]
+
+                loaded = False
+                for path in default_paths:
+                    if os.path.exists(path):
+                        logger.info(f"Found tokenizer at: {path}")
+                        try:
+                            self.tokenizer = self._load_local_tokenizer(
+                                path, model_name, tiktoken
+                            )
+                            logger.info(f"✅ Loaded tokenizer from: {path}")
+                            loaded = True
+                            break
+                        except Exception as e:
+                            logger.warning(f"Failed to load from {path}: {e}")
+                            continue
+
+                # Если не нашли локально, пытаемся загрузить через интернет
+                if not loaded:
+                    logger.info(
+                        "No local tokenizer found, attempting online download..."
+                    )
+                    self.tokenizer = tiktoken.get_encoding(model_name)
+                    logger.info("✅ Tokenizer loaded from online successfully")
+
+        except ImportError:
             logger.warning(
-                f"Failed to load {model_name}, falling back to cl100k_base: {e}"
+                "⚠️  tiktoken not installed, using simple word-based tokenizer"
             )
-            self.tokenizer = tiktoken.get_encoding("cl100k_base")
-        logger.info("Chunking service initialized successfully")
+            self.use_simple_tokenizer = True
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to load tiktoken: {e}")
+            logger.info("Falling back to simple word-based tokenizer")
+            self.use_simple_tokenizer = True
+
+        if self.use_simple_tokenizer:
+            logger.info(
+                "Using simple tokenizer with ~1.4 tokens per word approximation"
+            )
+
+    def _load_local_tokenizer(self, filepath: str, model_name: str, tiktoken_module):
+        """
+        Загрузить tokenizer из локального файла.
+
+        Args:
+            filepath: Путь к .tiktoken файлу (бинарный формат!)
+            model_name: Имя модели
+            tiktoken_module: Импортированный модуль tiktoken
+
+        Returns:
+            Encoding объект
+        """
+        import base64
+
+        from tiktoken.core import Encoding
+
+        logger.info(f"Reading tokenizer file: {filepath}")
+
+        # Читаем файл
+        with open(filepath, "rb") as f:
+            contents = f.read()
+
+        logger.info(f"File size: {len(contents)} bytes")
+
+        # Парсим файл
+        # Формат: каждая строка "base64_token rank"
+        mergeable_ranks = {}
+
+        try:
+            # Пробуем парсить как текстовый файл (base64 построчно)
+            lines = contents.decode("utf-8").strip().split("\n")
+            logger.info(f"Parsing text format file with {len(lines)} lines")
+
+            for line in lines:
+                if not line.strip():
+                    continue
+
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+
+                token_b64, rank_str = parts
+                try:
+                    token_bytes = base64.b64decode(token_b64)
+                    rank = int(rank_str)
+                    mergeable_ranks[token_bytes] = rank
+                except Exception as e:
+                    logger.debug(f"Failed to parse line: {line[:50]}... - {e}")
+                    continue
+
+            logger.info(
+                f"Successfully parsed {len(mergeable_ranks)} tokens from text format"
+            )
+
+        except UnicodeDecodeError:
+            # Это бинарный файл - ошибка в документации или формате
+            logger.error(
+                "File appears to be in binary format, but expected text format"
+            )
+            logger.error("Please ensure the file is in the correct format:")
+            logger.error("Each line should be: base64_token rank")
+            logger.error("Example: IQ== 0")
+            raise ValueError(
+                "Invalid tiktoken file format. "
+                "File should be text with lines: 'base64_token rank'"
+            )
+
+        if not mergeable_ranks:
+            raise ValueError(f"Failed to parse any tokens from {filepath}")
+
+        # Специальные токены для cl100k_base (GPT-4, GPT-3.5-turbo)
+        if model_name == "cl100k_base":
+            special_tokens = {
+                "<|endoftext|>": 100257,
+                "<|fim_prefix|>": 100258,
+                "<|fim_middle|>": 100259,
+                "<|fim_suffix|>": 100260,
+                "<|endofprompt|>": 100276,
+            }
+            pat_str = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+        elif model_name == "p50k_base":
+            special_tokens = {"<|endoftext|>": 50256}
+            pat_str = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        elif model_name == "r50k_base":
+            special_tokens = {"<|endoftext|>": 50256}
+            pat_str = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        else:
+            special_tokens = {}
+            pat_str = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+        # Создаем Encoding объект
+        encoding = Encoding(
+            name=model_name,
+            pat_str=pat_str,
+            mergeable_ranks=mergeable_ranks,
+            special_tokens=special_tokens,
+        )
+
+        logger.info(f"✅ Successfully created Encoding for {model_name}")
+
+        return encoding
 
     def count_tokens(self, text: str) -> int:
         """

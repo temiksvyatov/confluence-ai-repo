@@ -23,7 +23,7 @@ RUN mkdir -p /app/.cache
 
 # Переменные окружения
 ENV PYTHONUNBUFFERED=1
-ENV TRANSFORMERS_CACHE=/app/.cache
+ENV HF_HOME=/app/.cache
 ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache
 
 # Порт приложения

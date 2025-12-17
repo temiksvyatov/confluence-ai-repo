@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 
     # Tokenizer
     tokenizer_model: str = "cl100k_base"  # tiktoken model
+    tiktoken_local_path: str = "/tmp/tiktoken"
 
     # RAG
     top_k_results: int = 20  # Больше для reranking
